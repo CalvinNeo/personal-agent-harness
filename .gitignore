@@ -1,0 +1,47 @@
+# Local credentials and configuration (commit only *.example templates).
+.env
+.env.*
+*.env
+!*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+auth.json
+credentials.json
+cmd_config.json
+*_config.json
+admin-initial-password
+*token
+private-terms*
+config.local.*
+
+# AstrBot/Codex runtime state, conversations, images and task output.
+data/
+state/
+runtime/
+workspaces/
+backups/
+.codex/
+.astrbot/
+reminders.json
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.jsonl
+*.bak*
+*.backup*
+*.tar*
+*.zip
+*.whl
+
+# Development products.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store

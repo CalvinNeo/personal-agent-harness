@@ -1,0 +1,41 @@
+[Unit]
+Description=Isolated Codex runner for AstrBot explicit tasks
+After=network-online.target codex-api-proxy.service
+Wants=network-online.target
+Requires=codex-api-proxy.service
+
+[Service]
+Type=simple
+User=codexrunner
+Group=codexrunner
+ExecStart=/usr/bin/python3 /opt/astrbot-codex-runner/codex-runner.py
+Restart=on-failure
+RestartSec=5
+UMask=0007
+RuntimeDirectory=astrbot-codex
+RuntimeDirectoryMode=0750
+EnvironmentFile=/etc/astrbot/runner.env
+SupplementaryGroups=
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/codexrunner/workspaces /var/lib/codexrunner/codex /run/astrbot-codex
+MemoryMax=450M
+TasksMax=96
+
+[Install]
+WantedBy=multi-user.target

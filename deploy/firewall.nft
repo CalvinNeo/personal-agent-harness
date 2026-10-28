@@ -1,0 +1,4 @@
+add table inet astrbot_guard
+flush table inet astrbot_guard
+add chain inet astrbot_guard input { type filter hook input priority -10; policy accept; }
+add rule inet astrbot_guard input iifname != "lo" tcp dport 6185 counter drop comment "AstrBot SSH tunnel only"

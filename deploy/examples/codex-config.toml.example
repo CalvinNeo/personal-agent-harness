@@ -1,0 +1,12 @@
+# Copy to /var/lib/codexrunner/codex/config.toml.
+# The runner passes HARNESS_MODEL via -m; no API key goes in this file.
+model_provider = "local_proxy"
+
+[model_providers.local_proxy]
+name = "Local model proxy"
+base_url = "http://127.0.0.1:6186/v1"
+wire_api = "responses"
+
+[features]
+plugins = false
+apps = false

@@ -1,0 +1,6 @@
+name: reminder
+version: 1.1.0
+author: local
+repo: local
+desc: 自然语言与命令、本地持久化 QQ 群定时提醒，不经过 Codex。
+astrbot_version: ">=4.29.0"

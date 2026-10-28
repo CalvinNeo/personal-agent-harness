@@ -1,0 +1,10 @@
+{
+  "allowed_umos": {"type": "list", "items": {"type": "string"}, "default": [], "description": "Exact allowed unified message origins; empty means deny all"},
+  "allowed_senders": {"type": "list", "items": {"type": "string"}, "default": [], "description": "Optional exact QQ sender IDs"},
+  "reminder_file": {"type": "string", "default": "/var/lib/astrbot/data/plugins/reminder/reminders.json"},
+  "min_delay_seconds": {"type": "int", "default": 5, "minimum": 1, "maximum": 3600},
+  "max_delay_seconds": {"type": "int", "default": 604800, "minimum": 60, "maximum": 604800},
+  "max_text_chars": {"type": "int", "default": 500, "minimum": 10, "maximum": 500},
+  "max_per_group": {"type": "int", "default": 20, "minimum": 1, "maximum": 100},
+  "max_per_sender": {"type": "int", "default": 10, "minimum": 1, "maximum": 50}
+}

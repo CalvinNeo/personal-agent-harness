@@ -1,0 +1,10 @@
+{
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "reminder_file": "/var/lib/astrbot/data/plugins/reminder/reminders.json",
+  "min_delay_seconds": 5,
+  "max_delay_seconds": 604800,
+  "max_text_chars": 500,
+  "max_per_group": 20,
+  "max_per_sender": 10
+}

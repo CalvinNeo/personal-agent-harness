@@ -1,0 +1,4 @@
+name: image_context
+desc: 同群同发送者的短期图片引用，不调用 Codex
+version: 1.0.0
+author: local

@@ -1,0 +1,18 @@
+{
+  "allowed_umos": {
+    "type": "list",
+    "default": []
+  },
+  "allowed_senders": {
+    "type": "list",
+    "default": []
+  },
+  "write_senders": {
+    "type": "list",
+    "default": []
+  },
+  "socket_path": {
+    "type": "string",
+    "default": "/run/astrbot-codex/bridge.sock"
+  }
+}

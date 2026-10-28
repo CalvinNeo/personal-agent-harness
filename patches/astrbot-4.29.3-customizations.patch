@@ -1,0 +1,23 @@
+--- a/astrbot/core/provider/sources/openai_source.py
++++ b/astrbot/core/provider/sources/openai_source.py
+@@ -1090,7 +1090,7 @@
+         """处理API错误并尝试恢复"""
+         if "429" in str(e):
+             logger.warning(
+-                f"API 调用过于频繁，尝试使用其他 Key 重试。当前 Key: {chosen_key[:12]}",
++                "API 调用过于频繁，尝试使用其他 Key 重试。当前 Key 已隐藏。",
+             )
+             # 最后一次不等待
+             if retry_cnt < max_retries - 1:
+--- a/astrbot/core/tools/web_search_tools.py
++++ b/astrbot/core/tools/web_search_tools.py
+@@ -1889,7 +1889,8 @@
+ 
+         zone = kwargs.get("zone", "")
+         if zone in ("cn", "intl", "global"):
+-            payload["zone"] = zone
++            # AnySearch accepts cn/intl; map global to intl for compatibility.
++            payload["zone"] = "intl" if zone == "global" else zone
+ 
+         language = str(kwargs.get("language", "")).strip()
+         if language:

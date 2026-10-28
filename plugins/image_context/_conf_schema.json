@@ -1,0 +1,12 @@
+{
+  "allowed_umos": {
+    "description": "允许图片上下文的群会话 UMO（空列表拒绝所有会话）",
+    "type": "list",
+    "default": []
+  },
+  "allowed_senders": {
+    "description": "允许的发送者 OpenID（空列表表示允许已授权群内成员）",
+    "type": "list",
+    "default": []
+  }
+}

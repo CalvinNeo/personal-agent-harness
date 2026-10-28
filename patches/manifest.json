@@ -1,0 +1,15 @@
+{
+  "astrbot_version": "4.29.3",
+  "files": [
+    {
+      "path": "astrbot/core/provider/sources/openai_source.py",
+      "original_sha256": "73c4f3675d5cbb1d448a13c8b43a12fe251aafdd60858066d32bae563a2d96f1",
+      "patched_sha256": "b9d4fd4aab4c600c5664e61d862f4e4782bb0f77807670c346a808d40cb73c79"
+    },
+    {
+      "path": "astrbot/core/tools/web_search_tools.py",
+      "original_sha256": "f49ea28a6a1942ae9138ba2ba67faccb685b37a7611d07bcf590c5b30acff26e",
+      "patched_sha256": "dce55fe115f6071a94e5ef057578c8f1e929f5efc0b14c0d0dbb02a520073b10"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "write_senders": [],
+  "socket_path": "/run/astrbot-codex/bridge.sock"
+}
