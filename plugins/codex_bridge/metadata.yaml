@@ -1,6 +1,6 @@
 name: codex_bridge
-version: 1.0.0
+version: 1.2.0
 author: local
 repo: local
-desc: Run explicitly requested Codex tasks through an isolated local runner.
+desc: Natural-language Codex delegation, guarded complex-task routing and persistent QQ status boards.
 astrbot_version: ">=4.29.0"

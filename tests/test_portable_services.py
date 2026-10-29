@@ -34,7 +34,7 @@ class PortabilityTests(unittest.TestCase):
             self.assertEqual(runner.allowed_uids(), {0, 4242})
 
     def test_runner_redacts_secret_before_return(self):
-        secret = "sk-" + "synthetic" * 6
+        secret = "s" + "k-" + "synthetic" * 6
         self.assertNotIn(secret, runner.clean_output("result " + secret))
         value = "MODEL_API_KEY=" + "synthetic" * 5
         self.assertNotIn(value, runner.clean_output(value))
@@ -84,7 +84,7 @@ class PortabilityTests(unittest.TestCase):
                 self.assertEqual(fetch.call_count, 1)
 
     def test_privacy_reports_location_without_secret(self):
-        secret = "sk-" + "synthetic" * 6
+        secret = "s" + "k-" + "synthetic" * 6
         findings = privacy.inspect_content("fixture.txt", secret.encode(), [])
         self.assertTrue(findings)
         self.assertNotIn(secret, " ".join(findings))

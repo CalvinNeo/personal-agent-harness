@@ -8,11 +8,11 @@
 | --- | --- | --- |
 | `/opt/astrbot/venv` | 固定版本 AstrBot 和 Python 依赖 | 否，按版本重新安装 |
 | `/opt/astrbot-codex-runner` | Codex runner 与代理程序 | 源码在 `services/`，部署副本不直接跟踪 |
-| `/var/lib/astrbot/data/plugins` | 三个自定义插件及其他插件的部署位置 | 仅收录本仓库的插件源码 |
+| `/var/lib/astrbot/data/plugins` | 自定义插件及其他插件的部署位置 | 仅收录本仓库的插件源码 |
 | `/var/lib/astrbot/data/config` | 插件私有配置、会话和发送者白名单 | 否 |
 | `/var/lib/astrbot/data/cmd_config.json` | AstrBot、QQ、模型和后台私有配置 | 否 |
 | `/var/lib/astrbot/data/plugins/reminder/reminders.json` | 待执行提醒及提醒内容 | 否 |
-| `/var/lib/codexrunner` | Codex 配置、按会话隔离的工作目录 | 否 |
+| `/var/lib/codexrunner` | Codex 配置、任务记录、按会话隔离的工作目录和原图 | 否 |
 | `/var/lib/codexproxy/upstream-token` | 代理使用的上游模型密钥 | 否 |
 | `/run/astrbot-codex/bridge.sock` | AstrBot 与 Codex runner 的本机通信 socket | 否，运行时创建 |
 | `/etc/astrbot` | 主机侧防火墙及环境配置 | 仅收录脱敏模板 |
@@ -22,7 +22,7 @@
 
 ## 配置和启动前检查
 
-按照仓库 README 完成安装后，在服务器本地填写 QQ 凭据、模型提供商地址和密钥。不要把真实值填回示例文件后提交。初始化工具在 AstrBot 主白名单写入拒绝占位值，三个插件的允许列表为空，机器人默认不接受任何群。AstrBot 主白名单不能清空，清空会放行所有会话；放行时同步维护框架层白名单和相关插件的 `allowed_umos`。
+按照仓库 README 完成安装后，在服务器本地填写 QQ 凭据、模型提供商地址和密钥。不要把真实值填回示例文件后提交。初始化工具在 AstrBot 主白名单写入拒绝占位值，各插件的允许列表为空，机器人默认不接受任何群。AstrBot 主白名单不能清空，清空会放行所有会话；放行时同步维护框架层白名单和相关插件的 `allowed_umos`。
 
 `allowed_senders` 空列表表示授权群内不再限制用户。若只允许部分成员使用，应填入明确的发送者标识。Codex 写入功能使用独立的 `write_senders`，默认关闭。
 
@@ -117,7 +117,7 @@ sudo journalctl -u astrbot.service -f -o short-iso
 
 AstrBot 固定为 4.29.3。两处源码补丁应通过仓库提供的补丁工具应用，并检查匹配的版本和基线。升级 AstrBot 或 Codex 后，重新验证插件导入、配置类型、事件优先级、QQ 回复方式、沙箱限制与模型接口，不要只运行 `py_compile` 就判断升级成功。
 
-重启后检查三个插件均加载成功，后台仍只监听本机，默认拒绝与允许列表按预期生效。对解析和图片选择先运行仓库的本地测试，再按需要进行获准会话中的端到端测试；不要通过重放旧提醒或旧聊天记录制造重复通知。
+重启后检查各插件均加载成功，后台仍只监听本机，默认拒绝与允许列表按预期生效。对解析和图片选择先运行仓库的本地测试，再按需要进行获准会话中的端到端测试；不要通过重放旧提醒或旧聊天记录制造重复通知。
 
 回滚时恢复对应版本的源文件和服务模板，保留当前私有状态；若状态结构发生变化，先按该版本说明迁移。恢复旧备份的提醒状态可能重复发送已经执行的任务，应先人工核对。
 

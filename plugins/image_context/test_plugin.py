@@ -160,6 +160,15 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.remember_images(event)
         self.assertEqual(len(self.plugin._cache._sessions), 0)
 
+    async def test_light_route_allows_unmatched_image_wording(self):
+        await self.plugin.remember_images(FakeEvent(images=[ref(1)]))
+        event, req = FakeEvent("看看这张", addressed=True), request()
+        event.set_extra("intent_router_accepted", True)
+        event.set_extra("intent_router_route", "image")
+        await self.plugin.add_image_context(event, req)
+        visual = [part for part in req.extra_user_content_parts if isinstance(part, FakeImagePart)]
+        self.assertEqual([part.image_url.url for part in visual], [ref(1)])
+
     async def test_ordinary_llm_request_unchanged(self):
         event, req = FakeEvent("今天要做什么"), request()
         req.contexts = [{"role": "user", "content": "hello"}]

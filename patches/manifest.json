@@ -10,6 +10,16 @@
       "path": "astrbot/core/tools/web_search_tools.py",
       "original_sha256": "f49ea28a6a1942ae9138ba2ba67faccb685b37a7611d07bcf590c5b30acff26e",
       "patched_sha256": "dce55fe115f6071a94e5ef057578c8f1e929f5efc0b14c0d0dbb02a520073b10"
+    },
+    {
+      "path": "astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py",
+      "original_sha256": "b2b839d8dfd27da8e9011d97bc91d4777c44f3d8d0d4dc96f4ebbcc62c62d6d4",
+      "patched_sha256": "2c56435a9c9a33490df36e0eb37020df70c913caca82669a5d1f7bd8b5f960a6"
+    },
+    {
+      "path": "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py",
+      "original_sha256": "f9e9a727d645cfd53d33bd1804f43d46a8413b4ca925dcff3e024a6c0259c8f0",
+      "patched_sha256": "3c6d62ca2d58ab47b9250655c24a21cd0c832a754dc18d033332a4be5ce7fa05"
     }
   ]
 }

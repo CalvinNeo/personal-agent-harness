@@ -1,0 +1,13 @@
+{
+  "id": "planner-astra-light",
+  "type": "openai_chat_completion",
+  "name": "Astra Planner (low)",
+  "enable": false,
+  "api_base": "http://api.appintheloop.com",
+  "key": ["REPLACE_LOCALLY"],
+  "model": "gpt-6-astra",
+  "custom_extra_body": {
+    "reasoning_effort": "low",
+    "max_tokens": 512
+  }
+}

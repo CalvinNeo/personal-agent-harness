@@ -1,0 +1,11 @@
+{
+  "mode": "regex",
+  "provider_id": "planner-astra-light",
+  "model": "gpt-6-astra",
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "timeout_seconds": 3.0,
+  "min_confidence": 0.85,
+  "max_input_chars": 6000,
+  "log_route_details": true
+}

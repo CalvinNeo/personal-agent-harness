@@ -6,8 +6,10 @@
 | --- | --- | --- |
 | 本地提醒 | `plugins/reminder/` | 支持命令和明确的自然语言提醒，持久化单次任务，在到期时发送真正的 QQ `@` 提醒。 |
 | 图片上下文 | `plugins/image_context/` | 暂存同一发送者最近的图片，使后续“刚发的那几张图”能够引用对应图片。 |
-| Codex 接入 | `plugins/codex_bridge/` | 通过显式命令提交复杂任务，并使用原始 QQ 消息事件回传异步结果。 |
-| Codex 执行进程 | `services/codex-runner.py` | 以独立低权限账户执行任务，校验 Unix socket 对端身份，限制工作目录、执行时间和输出大小。 |
+| Codex 接入 | `plugins/codex_bridge/` | 通过命令、自然语言和受限语义工具提交复杂任务，使用状态看板和原始 QQ 回执回传异步结果。 |
+| Codex 会话续接 | `services/conversations.py` | 保存真实原生 session ID、按 owner 隔离原图和工作区；引用 Codex 回复时续接原会话。 |
+| 轻量意图路由 | `plugins/intent_router/` | `regex` 使用现有规则；`light` 用独立 GPT-6 Astra low 做固定枚举路由，失败自动回退。 |
+| Codex 执行进程 | `services/codex-runner.py`、`services/media.py` | 以独立低权限账户执行任务，校验 Unix socket 对端身份，限制工作目录、执行时间、图片和输出大小。 |
 | 模型代理 | `services/codex-api-proxy.py` | 在本机代理模型请求，将上游模型密钥与 Codex 任务进程分开保存。 |
 | AstrBot 内置功能修正 | `patches/`、`scripts/apply_patches.py` | 修正 AnySearch 区域参数，并移除模型限流重试日志中的密钥前缀。 |
 | 部署与访问限制 | `deploy/`、`scripts/` | 提供专用账户的 systemd 服务、本机端口限制、默认拒绝的配置初始化及检查工具。 |
@@ -70,7 +72,7 @@ QQ 官方适配器在纯文本消息中会直接显示 `<qqbot-at-user ... />`�
 
 ## 默认关闭与未纳入内容
 
-三个自定义插件均以 `allowed_umos` 精确匹配允许的会话，空列表拒绝所有会话。`allowed_senders` 是进一步限制：在已允许的会话内，空列表表示不再限制发送者；Codex 的 `write_senders` 空列表则表示没有人能使用写入模式。框架层的会话白名单与插件白名单都要配置，不能只修改其中一个。
+自定义插件均以 `allowed_umos` 精确匹配允许的会话，空列表拒绝所有会话。`allowed_senders` 是进一步限制：在已允许的会话内，空列表表示不再限制发送者；Codex 的 `write_senders` 空列表则表示没有人能使用写入模式。框架层的会话白名单与插件白名单都要配置，不能只修改其中一个。
 
 管理后台和模型代理只监听回环地址，通过 SSH 隧道管理；Codex 执行器只暴露本机 Unix socket。部署模板使用专用服务账户、严格文件权限和有限资源，避免把执行器当作 root 运行。
 

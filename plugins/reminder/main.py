@@ -222,12 +222,24 @@ class Main(star.Star):
         text = _request_text(event)
         if not text or text.startswith("/"):
             return
+        light_route = event.get_extra("intent_router_route")
+        light_accepted = bool(event.get_extra("intent_router_accepted"))
+        light_task = str(event.get_extra("intent_router_task") or "").strip()
+        # Preserve the deterministic parser's negative/quoted/ambiguous guards
+        # before accepting a light-model normalization candidate.
         try:
             parsed = parse_natural(text, datetime.now(LOCAL_TZ))
         except ReminderParseError as error:
             event.stop_event()
             await event.send(MessageChain([Plain(str(error))]))
             return
+        if parsed is None and light_accepted and light_route == "reminder" and light_task:
+            try:
+                parsed = parse_natural(light_task, datetime.now(LOCAL_TZ))
+            except ReminderParseError as error:
+                event.stop_event()
+                await event.send(MessageChain([Plain(str(error))]))
+                return
         if parsed is None:
             return
         event.stop_event()

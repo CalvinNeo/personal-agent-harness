@@ -10,7 +10,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.core.agent.message import ImageURLPart, TextPart
 from astrbot.core.provider.entities import ProviderRequest
 
-from .core import ImageCache, ImageReferenceError, is_safe_image_ref, parse_reference, without_historical_images
+from .core import ImageCache, ImageReferenceError, ImageSelection, is_safe_image_ref, parse_reference, without_historical_images
 
 _CACHED_EXTRA = "local_image_context_cached"
 _INJECTED_EXTRA = "local_image_context_injected"
@@ -99,6 +99,12 @@ class Main(star.Star):
         text = " ".join(part.text for part in event.get_messages() if isinstance(part, Plain))
         try:
             selection = parse_reference(text)
+            light_image = bool(event.get_extra("intent_router_accepted")) and event.get_extra("intent_router_route") == "image"
+            if selection is None and light_image:
+                # The planner may recognize “看看这张” even when the wording
+                # does not match the reference regex. Use only this sender's
+                # latest batch; the cache and URL allowlist still apply.
+                selection = ImageSelection()
             if selection is None:
                 return
             self._remember(event)

@@ -1,0 +1,53 @@
+{
+  "mode": {
+    "type": "string",
+    "default": "regex",
+    "enum": ["regex", "light"],
+    "description": "regex=现有正则路径；light=先用 GPT-6 Astra low 做静态路由，失败回退正则"
+  },
+  "provider_id": {
+    "type": "string",
+    "default": "planner-astra-light",
+    "description": "独立轻量规划 provider 的 ID"
+  },
+  "model": {
+    "type": "string",
+    "default": "gpt-6-astra",
+    "description": "规划模型；reasoning_effort=low 应写在 provider custom_extra_body"
+  },
+  "allowed_umos": {
+    "type": "list",
+    "items": {"type": "string"},
+    "default": [],
+    "description": "精确允许的 QQ UMO；空列表拒绝全部会话"
+  },
+  "allowed_senders": {
+    "type": "list",
+    "items": {"type": "string"},
+    "default": [],
+    "description": "可选的精确 QQ 发送者白名单"
+  },
+  "timeout_seconds": {
+    "type": "float",
+    "default": 3.0,
+    "minimum": 0.5,
+    "maximum": 10.0
+  },
+  "min_confidence": {
+    "type": "float",
+    "default": 0.85,
+    "minimum": 0.5,
+    "maximum": 0.99
+  },
+  "max_input_chars": {
+    "type": "int",
+    "default": 6000,
+    "minimum": 256,
+    "maximum": 12000
+  },
+  "log_route_details": {
+    "type": "bool",
+    "default": true,
+    "description": "只记录 route、置信度、耗时和失败代码"
+  }
+}

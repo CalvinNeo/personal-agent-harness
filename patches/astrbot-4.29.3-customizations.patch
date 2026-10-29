@@ -21,3 +21,59 @@
  
          language = str(kwargs.get("language", "")).strip()
          if language:
+--- a/astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py
++++ b/astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py
+@@ -390,13 +390,21 @@
+     async def _post_send(self, stream: dict | None = None):
+         if not self.send_buffer:
+             return None
+-
++        original_chain = self.send_buffer
++        # Delivery receipts let plugins bind an actual QQ reply to its task.
++        # Keep the existing send() return contract and attach only API IDs.
++        original_chain.qqofficial_sent_message_ids = []
+         message_chains = self._split_message_chain_by_media(self.send_buffer)
+         stream_for_chain = stream if len(message_chains) == 1 else None
+ 
+         ret = None
+         for message_chain in message_chains:
+             ret = await self._post_send_one(message_chain, stream_for_chain)
++            receipt_id = self._extract_response_message_id(ret)
++            if receipt_id:
++                original_chain.qqofficial_sent_message_ids.append(receipt_id)
++                known = list(self.get_extra("qqofficial_sent_message_ids") or [])
++                self.set_extra("qqofficial_sent_message_ids", list(dict.fromkeys([*known, receipt_id]))[-128:])
+ 
+         self.send_buffer = None
+ 
+--- a/astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py
++++ b/astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py
+@@ -346,6 +346,7 @@
+         Returns:
+             None.
+         """
++        message_chain.qqofficial_sent_message_ids = []
+         if session.message_type == MessageType.GROUP_MESSAGE:
+             session = MessageSesion(
+                 session.platform_id,
+@@ -357,8 +358,12 @@
+             message_chain
+         )
+         if len(message_chains) > 1:
++            message_chain.qqofficial_sent_message_ids = []
+             for split_message_chain in message_chains:
+                 await self._send_by_session_common(session, split_message_chain)
++                message_chain.qqofficial_sent_message_ids.extend(
++                    getattr(split_message_chain, "qqofficial_sent_message_ids", [])
++                )
+             return
+ 
+         (
+@@ -558,6 +563,7 @@
+             return
+ 
+         sent_message_id = self._extract_message_id(ret)
++        message_chain.qqofficial_sent_message_ids = [sent_message_id] if sent_message_id else []
+         if sent_message_id:
+             self.remember_session_message_id(session.session_id, sent_message_id)
+         await Platform.send_by_session(self, session, message_chain)

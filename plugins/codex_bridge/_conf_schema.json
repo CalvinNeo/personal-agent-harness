@@ -1,18 +1,9 @@
 {
-  "allowed_umos": {
-    "type": "list",
-    "default": []
-  },
-  "allowed_senders": {
-    "type": "list",
-    "default": []
-  },
-  "write_senders": {
-    "type": "list",
-    "default": []
-  },
-  "socket_path": {
-    "type": "string",
-    "default": "/run/astrbot-codex/bridge.sock"
-  }
+  "allowed_umos": {"type": "list", "default": []},
+  "allowed_senders": {"type": "list", "default": []},
+  "write_senders": {"type": "list", "default": []},
+  "socket_path": {"type": "string", "default": "/run/astrbot-codex/bridge.sock"},
+  "natural_language_enabled": {"type": "bool", "default": true, "description": "Recognize direct natural-language requests to use Codex; still requires an allowed group/user and @ mention."},
+  "auto_complex_enabled": {"type": "bool", "default": true, "description": "Automatically route clear engineering and multi-step research requests to Codex in read-only mode."},
+  "semantic_routing_enabled": {"type": "bool", "default": true, "description": "Let the chat model delegate an unfamiliar but clear complex request through a guarded no-argument tool."}
 }
