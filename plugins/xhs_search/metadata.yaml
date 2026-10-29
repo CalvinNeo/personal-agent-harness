@@ -1,0 +1,6 @@
+name: xhs_search
+version: 2.0.0
+author: local
+repo: local
+desc: Secure QR-authenticated, read-only Xiaohongshu search for exact QQ allowlists.
+astrbot_version: ">=4.29.0"

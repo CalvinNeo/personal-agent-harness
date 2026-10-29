@@ -1,0 +1,235 @@
+--- a/service.go
++++ b/service.go
+@@ -5,6 +5,7 @@
+ 	"encoding/json"
+ 	"fmt"
+ 	"os"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/go-rod/rod"
+@@ -133,30 +134,85 @@
+ 	return response, nil
+ }
+ 
+-// GetLoginQrcode 获取登录的扫码二维码
+-func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
+-	b := newBrowser()
+-	page := b.NewPage()
++// qrBrowserResources owns a browser/page until a pending-login goroutine is
++// successfully started. The sync.Once makes outer error cleanup and the
++// goroutine's eventual cleanup safe to race.
++type qrBrowserResources struct {
++	browser   *headless_browser.Browser
++	page      *rod.Page
++	once      sync.Once
++	handedOff bool
++}
+ 
+-	deferFunc := func() {
+-		_ = page.Close()
+-		b.Close()
+-	}
++func (r *qrBrowserResources) close() {
++	r.once.Do(func() {
++		if r.page != nil {
++			func() {
++				defer func() { _ = recover() }()
++				_ = r.page.Close()
++			}()
++		}
++		if r.browser != nil {
++			func() {
++				defer func() { _ = recover() }()
++				r.browser.Close()
++			}()
++		}
++	})
++}
+ 
+-	loginAction := xiaohongshu.NewLogin(page)
+-
+-	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
+-	if err != nil || loggedIn {
+-		defer deferFunc()
++func newQRBrowser() (browser *headless_browser.Browser, err error) {
++	defer func() {
++		if recover() != nil {
++			browser = nil
++			err = fmt.Errorf("启动登录浏览器失败")
++		}
++	}()
++	return newBrowser(), nil
++}
++
++func newQRPage(browser *headless_browser.Browser) (page *rod.Page, err error) {
++	defer func() {
++		if recover() != nil {
++			page = nil
++			err = fmt.Errorf("创建登录页面失败")
++		}
++	}()
++	return browser.NewPage(), nil
++}
++
++// GetLoginQrcode 获取登录的扫码二维码
++func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
++	b, err := newQRBrowser()
++	if err != nil {
++		return nil, err
+ 	}
++	resources := &qrBrowserResources{browser: b}
++	defer func() {
++		if !resources.handedOff {
++			resources.close()
++		}
++	}()
++
++	page, err := newQRPage(b)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	resources.page = page
+ 
+-	timeout := 4 * time.Minute
++	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	loginAction := xiaohongshu.NewLogin(page)
++	img, loggedIn, err := loginAction.FetchQrcodeImage(fetchCtx)
++	if err != nil {
++		return nil, err
++	}
+ 
++	timeout := 4 * time.Minute
+ 	if !loggedIn {
+-		s.waitScanInBackground(loginAction, page, deferFunc, timeout)
++		// waitScanInBackground assumes ownership only after its setup returns.
++		s.waitScanInBackground(loginAction, page, resources.close, timeout)
++		resources.handedOff = true
+ 	}
+ 
+ 	return &LoginQrcodeResponse{
+--- a/xiaohongshu/login.go
++++ b/xiaohongshu/login.go
+@@ -18,22 +18,21 @@
+ }
+ 
+ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
+-	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）
+-	pp := a.page.Context(ctx).Timeout(30 * time.Second)
+-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
++	pp := a.page.Context(ctx)
++	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
++		return false, errors.Wrap(err, "navigate to login status page failed")
++	}
++	// DOM readiness is sufficient for the login marker and does not wait for
++	// every image/analytics resource to finish loading.
++	if err := pp.Wait(rod.Eval(`() => document.readyState !== "loading"`)); err != nil {
++		return false, errors.Wrap(err, "wait for login status DOM failed")
++	}
+ 
+-	time.Sleep(1 * time.Second)
+-
+ 	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+ 	if err != nil {
+ 		return false, errors.Wrap(err, "check login status failed")
+ 	}
+-
+-	if !exists {
+-		return false, errors.Wrap(err, "login status element not found")
+-	}
+-
+-	return true, nil
++	return exists, nil
+ }
+ 
+ // CurrentUser 当前登录用户的基础信息。
+@@ -72,42 +71,62 @@
+ 
+ func (a *LoginAction) Login(ctx context.Context) error {
+ 	pp := a.page.Context(ctx)
++	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
++		return errors.Wrap(err, "navigate to login page failed")
++	}
++	if err := pp.Wait(rod.Eval(`() => document.readyState !== "loading"`)); err != nil {
++		return errors.Wrap(err, "wait for login DOM failed")
++	}
+ 
+-	// 导航到小红书首页，这会触发二维码弹窗
+-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+-
+-	time.Sleep(2 * time.Second)
+-
+-	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
++	if exists, _, err := pp.Has(".main-container .user .link-wrapper .channel"); err != nil {
++		return errors.Wrap(err, "check login status failed")
++	} else if exists {
+ 		return nil
+ 	}
+-
+-	pp.MustElement(".main-container .user .link-wrapper .channel")
+-
+-	return nil
++	return errors.New("login status element not found")
+ }
+ 
+ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
+ 	pp := a.page.Context(ctx)
+-
+-	// 导航到小红书首页，这会触发二维码弹窗
+-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+-
+-	time.Sleep(2 * time.Second)
+-
+-	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
+-		return "", true, nil
++	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
++		return "", false, errors.Wrap(err, "navigate to login page failed")
+ 	}
+-
+-	src, err := pp.MustElement(".login-container .qrcode-img").Attribute("src")
+-	if err != nil {
+-		return "", false, errors.Wrap(err, "get qrcode src failed")
++	if err := pp.Wait(rod.Eval(`() => document.readyState !== "loading"`)); err != nil {
++		return "", false, errors.Wrap(err, "wait for login DOM failed")
+ 	}
+-	if src == nil || len(*src) == 0 {
+-		return "", false, errors.New("qrcode src is empty")
+-	}
+ 
+-	return *src, false, nil
++	ticker := time.NewTicker(100 * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		if exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`); err != nil {
++			if ctx.Err() != nil {
++				return "", false, ctx.Err()
++			}
++			return "", false, errors.Wrap(err, "check existing login failed")
++		} else if exists {
++			return "", true, nil
++		}
++		if exists, element, err := pp.Has(`.login-container .qrcode-img`); err != nil {
++			if ctx.Err() != nil {
++				return "", false, ctx.Err()
++			}
++			return "", false, errors.Wrap(err, "find login qrcode failed")
++		} else if exists && element != nil {
++			src, err := element.Attribute("src")
++			if err != nil {
++				return "", false, errors.Wrap(err, "get qrcode src failed")
++			}
++			if src == nil || len(*src) == 0 {
++				return "", false, errors.New("qrcode src is empty")
++			}
++			return *src, false, nil
++		}
++		select {
++		case <-ctx.Done():
++			return "", false, ctx.Err()
++		case <-ticker.C:
++		}
++	}
+ }
+ 
+ func (a *LoginAction) WaitForLogin(ctx context.Context) bool {

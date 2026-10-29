@@ -1,0 +1,42 @@
+{
+  "allowed_umos": {
+    "description": "允许小红书搜索的精确 QQ UMO；空列表拒绝全部请求",
+    "type": "list",
+    "default": []
+  },
+  "allowed_senders": {
+    "description": "可选的精确 QQ 发送者 ID；空列表表示允许已批准 UMO 内的发送者",
+    "type": "list",
+    "default": []
+  },
+  "login_umos": {
+    "description": "允许执行 /xhs login、status、logout 的精确 QQ 私聊 UMO；不得填写群 UMO",
+    "type": "list",
+    "default": []
+  },
+  "login_senders": {
+    "description": "允许小红书扫码登录的精确 QQ 发送者 ID；空列表拒绝登录",
+    "type": "list",
+    "default": []
+  },
+  "endpoint": {
+    "description": "本机小红书服务地址；建议仅监听 127.0.0.1",
+    "type": "string",
+    "default": "http://127.0.0.1:18060"
+  },
+  "api_token_file": {
+    "description": "本机服务 API token 文件；由 root 创建并设为 0600 或受限 0640",
+    "type": "string",
+    "default": "/etc/xhs/api-token"
+  },
+  "timeout_seconds": {
+    "description": "上游请求超时时间（秒）",
+    "type": "float",
+    "default": 90.0
+  },
+  "max_results": {
+    "description": "每次最多返回的结果数量",
+    "type": "int",
+    "default": 5
+  }
+}
