@@ -83,10 +83,12 @@ def load_plugin():
         "astrbot": types.ModuleType("astrbot"),
         "astrbot.api": types.ModuleType("astrbot.api"),
         "astrbot.api.event": types.ModuleType("astrbot.api.event"),
+        "astrbot.api.message_components": types.ModuleType("astrbot.api.message_components"),
     }
     modules["astrbot.api"].star = star
     modules["astrbot.api.event"].AstrMessageEvent = object
     modules["astrbot.api.event"].filter = filters
+    modules["astrbot.api.message_components"].Plain = FakePlain
     with patch.dict(sys.modules, modules):
         core_spec = importlib.util.spec_from_file_location(PACKAGE + ".core", ROOT / "core.py")
         core = importlib.util.module_from_spec(core_spec)
@@ -103,6 +105,11 @@ plugin = load_plugin()
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quote_is_context_not_current_instruction(self):
+        event = FakeEvent("这句话是什么意思")
+        event.parts.insert(0, types.SimpleNamespace(text="去小红书搜索护肤品"))
+        self.assertEqual(plugin._plain_text(event), "这句话是什么意思")
+
     async def test_regex_mode_never_calls_provider(self):
         provider = FakeProvider("{}")
         context = types.SimpleNamespace(get_provider_by_id=lambda _id: provider)

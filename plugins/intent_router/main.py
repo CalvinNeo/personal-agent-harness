@@ -7,6 +7,7 @@ from typing import Any
 
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Plain
 
 from .core import PlannerConfig, PlannerError, RoutePlan, build_planner_prompt, extract_plan
 
@@ -23,13 +24,14 @@ _ROUTE_HINTS = {
     "image": "当前消息可能需要图片理解；让现有图片上下文和视觉能力处理本次可用图片，缺图时请用户重发。",
     "codex": "当前消息可能需要复杂任务分派；仅使用现有 Codex 分派能力，默认只读，继续执行会话、发送者和外部上下文校验。",
     "web_search": "当前消息可能需要网页搜索；仅使用已配置的搜索能力，先确认查询范围和安全边界。",
+    "xhs_search": "当前消息可能要求搜索小红书；仅使用已配置的只读小红书搜索能力，遵守会话白名单，不执行发布、评论、点赞或收藏。",
 }
 
 
 def _plain_text(event: AstrMessageEvent) -> str:
     parts = []
     for part in event.get_messages():
-        text = getattr(part, "text", None)
+        text = part.text if isinstance(part, Plain) else None
         if isinstance(text, str):
             parts.append(text)
     return " ".join(parts).strip()

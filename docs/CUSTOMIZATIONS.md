@@ -9,6 +9,7 @@
 | Codex 接入 | `plugins/codex_bridge/` | 通过命令、自然语言和受限语义工具提交复杂任务，使用状态看板和原始 QQ 回执回传异步结果。 |
 | Codex 会话续接 | `services/conversations.py` | 保存真实原生 session ID、按 owner 隔离原图和工作区；引用 Codex 回复时续接原会话。 |
 | 轻量意图路由 | `plugins/intent_router/` | `regex` 使用现有规则；`light` 用独立 GPT-6 Astra low 做固定枚举路由，失败自动回退。 |
+| 小红书搜索 | `plugins/xhs_search/` | 通过本机 REST 服务只读搜索；QQ 私聊扫码，Cookie 独立持久化；不接收聊天中的 token。 |
 | Codex 执行进程 | `services/codex-runner.py`、`services/media.py` | 以独立低权限账户执行任务，校验 Unix socket 对端身份，限制工作目录、执行时间、图片和输出大小。 |
 | 模型代理 | `services/codex-api-proxy.py` | 在本机代理模型请求，将上游模型密钥与 Codex 任务进程分开保存。 |
 | AstrBot 内置功能修正 | `patches/`、`scripts/apply_patches.py` | 修正 AnySearch 区域参数，并移除模型限流重试日志中的密钥前缀。 |

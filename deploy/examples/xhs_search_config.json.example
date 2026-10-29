@@ -1,0 +1,10 @@
+{
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "login_umos": [],
+  "login_senders": [],
+  "endpoint": "http://127.0.0.1:18060",
+  "api_token_file": "/etc/xhs/api-token",
+  "timeout_seconds": 90,
+  "max_results": 5
+}

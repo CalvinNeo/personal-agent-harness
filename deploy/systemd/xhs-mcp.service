@@ -1,0 +1,46 @@
+[Unit]
+Description=Local Xiaohongshu MCP service for QQ search
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=xhs
+Group=xhs
+SupplementaryGroups=xhs-secret
+WorkingDirectory=/var/lib/xhs/data
+Environment=HOME=/var/lib/xhs
+Environment=PATH=/usr/bin:/bin
+UMask=0077
+ExecStart=/usr/local/libexec/xhs-mcp-start
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/xiaohongshu-mcp /etc/xhs/api-token
+ReadWritePaths=/var/lib/xhs
+# Chromium also binds an ephemeral loopback DevTools port. The API address is
+# fixed to 127.0.0.1 in the root-owned launcher; do not expose it publicly.
+MemoryAccounting=yes
+MemoryHigh=700M
+MemoryMax=1G
+TasksMax=384
+
+[Install]
+WantedBy=multi-user.target

@@ -92,7 +92,7 @@ class ModelTests(unittest.TestCase):
         self.assertIn('"missing_context": array', prompt)
         self.assertNotIn("gpt-6-astra", prompt)  # provider is configured outside the prompt
         self.assertNotIn('"reasoning_effort"', prompt)
-        self.assertEqual(set(CONTEXT_NEEDS), {"reminder", "schedule_reminder", "image", "codex", "web_search", "chat", "clarify"})
+        self.assertEqual(set(CONTEXT_NEEDS), {"reminder", "schedule_reminder", "image", "codex", "web_search", "xhs_search", "chat", "clarify"})
 
     def test_prompt_rejects_untrusted_or_unknown_hints(self):
         with self.assertRaises(PlannerError):

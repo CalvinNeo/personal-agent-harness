@@ -14,6 +14,8 @@
 | `/var/lib/astrbot/data/plugins/reminder/reminders.json` | 待执行提醒及提醒内容 | 否 |
 | `/var/lib/codexrunner` | Codex 配置、任务记录、按会话隔离的工作目录和原图 | 否 |
 | `/var/lib/codexproxy/upstream-token` | 代理使用的上游模型密钥 | 否 |
+| `/etc/xhs/api-token` | 本机小红书服务访问密钥（root:xhs-secret 0640） | 否 |
+| `/var/lib/xhs/data/cookies.json` | 小红书扫码后的账号登录态（xhs 0600） | 否 |
 | `/run/astrbot-codex/bridge.sock` | AstrBot 与 Codex runner 的本机通信 socket | 否，运行时创建 |
 | `/etc/astrbot` | 主机侧防火墙及环境配置 | 仅收录脱敏模板 |
 | `/etc/systemd/system` | 系统服务部署位置 | 模板在 `deploy/systemd/` |
@@ -54,6 +56,10 @@ sudo systemctl stop codex-api-proxy.service
 ```bash
 sudo systemctl restart astrbot.service
 ```
+
+小红书搜索服务独立使用 `systemctl start|stop|restart xhs-mcp.service`，暂停服务
+不会删除 Cookie；账号退出应由授权私聊执行 `/xhs logout`。连接、扫码与权限配置
+见 [XHS](XHS.md)。`18060` 必须只监听回环地址，不能公开到互联网。
 
 重启会清空图片 URL 缓存并中断插件内尚未回传的 Codex 任务；持久化提醒会在启动后重新加载。需要确定停止正在执行的 Codex 子进程时，同时停止 runner 服务。部署更新前应检查是否有进行中的任务。
 

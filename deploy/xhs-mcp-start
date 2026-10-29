@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+AUTH_TOKEN=$(cat /etc/xhs/api-token)
+[ -n "$AUTH_TOKEN" ]
+export AUTH_TOKEN
+export COOKIES_PATH=/var/lib/xhs/data/cookies.json
+exec /opt/xiaohongshu-mcp/xiaohongshu-mcp-linux-amd64 -headless=true -port=127.0.0.1:18060
