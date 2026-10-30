@@ -121,7 +121,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_light_mode_stores_validated_plan_and_injects_static_hint(self):
         payload = {"route": "codex", "confidence": 0.96, "task": "请研究这个项目", "mode": "read-only", "missing_context": []}
         provider = FakeProvider(json.dumps(payload, ensure_ascii=False))
-        context = types.SimpleNamespace(get_provider_by_id=lambda _id: provider)
+        requested_provider_ids = []
+        def get_provider_by_id(provider_id):
+            requested_provider_ids.append(provider_id)
+            return provider
+        context = types.SimpleNamespace(get_provider_by_id=get_provider_by_id)
         instance = plugin.Main(context, {"mode": "light", "allowed_umos": ["qq:GroupMessage:g"]})
         event = FakeEvent()
         await instance.classify_group_message(event)
@@ -130,6 +134,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await instance.add_route_hint(event, req)
         self.assertIn("route=codex", req.system_prompt)
         self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(requested_provider_ids, ["planner-minimax-light"])
+        self.assertEqual(provider.calls[0]["model"], "MiniMax-M3.1-Flash")
 
     async def test_light_failure_falls_back_without_plan(self):
         provider = FakeProvider("not json")

@@ -12,7 +12,7 @@
 | 独立任务执行和模型代理 | `services/` | Unix socket 调用方 UID 检查、专用账号、Codex 沙箱、任务超时、真实模型密钥只由代理持有 |
 | Codex 会话续接 | `services/conversations.py`、`plugins/codex_bridge/` | 引用已发送的 Codex 回复可续接同一个原生 session，并保留原图；失败时不会静默新建会话 |
 | 自然语言提醒 | `plugins/reminder/` | “两分钟后提醒我喝水”、北京时间、原子持久化、一次性调度、Markdown 真正 `@`、重试、列表/取消 |
-| 轻量意图路由 | `plugins/intent_router/` | `regex` 保持现有路径；`light` 用独立 GPT-6 Astra `reasoning_effort=low` 先做静态路由，失败回退 |
+| 轻量意图路由 | `plugins/intent_router/` | `regex` 保持现有路径；`light` 用可配置的兼容模型以 `reasoning_effort=low` 先做静态路由，失败回退 |
 | 小红书只读搜索 | `plugins/xhs_search/` | 白名单群搜索、light 路由和模型工具；管理员私聊扫码一次，登录态保留在独立服务目录 |
 | 图片引用 | `plugins/image_context/` | “上一张图”“刚发的那几张图”、同群同发送者、30 分钟/12 张上限、缺图提示重发 |
 | AstrBot 小补丁 | `patches/` | AnySearch `global → intl`；限流日志不再输出 API Key 前缀 |
@@ -55,7 +55,7 @@
    替换示例地址和模型。脚本拒绝覆盖已有配置，随机初始密码只写入 `/etc/astrbot/admin-initial-password`（root 可读）。QQ 和模型保持关闭，直到你本地配置完成。
 
 5. 将 `plugins/` 下的子目录复制到 `/var/lib/astrbot/data/plugins/`；将对应 `deploy/examples/*_config.json.example` 复制到 `/var/lib/astrbot/data/config/` 并去掉 `.example`。属主 `astrbot:astrbot`，目录 `0700`，配置 `0600`。复制 `services/*.py` 到 `/opt/astrbot-codex-runner/`，由 root 管理；持久 Codex runner 还需要 root 管理的 `codex-bwrap` 隔离启动器，路径由 `HARNESS_BWRAP` 指定。
-   `intent_router` 默认使用 `regex`。要试用 Astra 路由，单独配置并启用 `planner-astra-light` provider（`custom_extra_body.reasoning_effort=low`、`max_tokens=512`），确认 canary 后把 `intent_router_config.json` 的 `mode` 改为 `light`。规划器只返回固定路由，提醒/Codex/图片/搜索插件仍做最终校验。
+   `intent_router` 默认使用 `regex`。要启用轻量路由，单独配置并启用 `planner-minimax-light` provider（示例为 MiniMax M3.1 Flash，`custom_extra_body.reasoning_effort=low`、`max_tokens=512`），确认 canary 后把 `intent_router_config.json` 的 `mode` 改为 `light`。规划器只返回固定路由，提醒/Codex/图片/搜索插件仍做最终校验。
 6. 在服务器本地复制并填写 `deploy/examples/` 中的环境文件。`model.env` 放 `/etc/astrbot/`、`root:astrbot 0640`；`runner.env` 和 `proxy.env` 为 root 管理的 `0600` 文件。真实代理 API key 单独存 `/var/lib/codexproxy/upstream-token`，`root:codexproxy 0640`。不要把密钥作为命令行参数或发到 Git。
 7. 将 `codex-config.toml.example` 复制到 `/var/lib/codexrunner/codex/config.toml`（`codexrunner:codexrunner 0600`）。该文件只指向本机代理，不保存真实密钥。
 8. 安装 `deploy/systemd/*.service` 到 `/etc/systemd/system/`、`deploy/firewall.nft` 到 `/etc/astrbot/`，执行 `systemctl daemon-reload`，然后按运维文档启用服务。通过 SSH 隧道进入管理页面，在本地填写 QQ AppID/AppSecret、启用模型和 QQ 适配器。

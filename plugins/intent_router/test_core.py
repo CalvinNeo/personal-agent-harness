@@ -78,7 +78,7 @@ class ModelTests(unittest.TestCase):
     def test_config_defaults_are_safe_and_unknown_keys_rejected(self):
         config = PlannerConfig.from_mapping(None)
         self.assertEqual(config.mode, "regex")
-        self.assertEqual(config.model, "gpt-6-astra")
+        self.assertEqual(config.model, "MiniMax-M3.1-Flash")
         self.assertEqual(PlannerConfig.from_mapping({"mode": "light", "timeout_seconds": 2.5}).timeout, 2.5)
         with self.assertRaises(PlannerError):
             PlannerConfig.from_mapping({"mode": "light", "reasoning_effort": "low"})

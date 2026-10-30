@@ -83,7 +83,7 @@ class PlannerConfig:
     """Configuration for the optional planner provider.
 
     ``mode`` is the rollout switch: ``regex`` keeps the existing deterministic
-    parser and ``light`` enables the dedicated low-reasoning Astra planner.
+    parser and ``light`` enables the configured low-reasoning planner.
     ``timeout`` is a provider-call budget in seconds; the caller should
     enforce it with ``asyncio.wait_for``.  The default is deliberately
     ``regex`` so installing this module cannot change production behaviour.
@@ -93,8 +93,8 @@ class PlannerConfig:
     timeout: float = 3.0
     min_confidence: float = 0.85
     max_input_chars: int = 6000
-    provider_id: str = "planner-astra-light"
-    model: str = "gpt-6-astra"
+    provider_id: str = "planner-minimax-light"
+    model: str = "MiniMax-M3.1-Flash"
 
     @property
     def timeout_seconds(self) -> float:
@@ -330,8 +330,8 @@ def build_planner_prompt(text: str, context_hints: Iterable[str] = ()) -> str:
 
     routes = ", ".join(sorted(ROUTES))
     hint_text = ", ".join(hints) if hints else "none"
-    # The provider configuration should set model=gpt-6-astra and
-    # custom_extra_body.reasoning_effort=low.  It is intentionally absent from
+    # The provider configuration should set the selected model and
+    # custom_extra_body.reasoning_effort=low.  They are intentionally absent from
     # this prompt and from the per-request payload contract.
     return (
         "You are a routing planner. Return exactly one JSON object and no other JSON object.\n"

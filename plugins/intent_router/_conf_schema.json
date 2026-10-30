@@ -3,16 +3,16 @@
     "type": "string",
     "default": "regex",
     "enum": ["regex", "light"],
-    "description": "regex=现有正则路径；light=先用 GPT-6 Astra low 做静态路由，失败回退正则"
+    "description": "regex=现有正则路径；light=先用配置的 low reasoning 模型做静态路由，失败回退正则"
   },
   "provider_id": {
     "type": "string",
-    "default": "planner-astra-light",
+    "default": "planner-minimax-light",
     "description": "独立轻量规划 provider 的 ID"
   },
   "model": {
     "type": "string",
-    "default": "gpt-6-astra",
+    "default": "MiniMax-M3.1-Flash",
     "description": "规划模型；reasoning_effort=low 应写在 provider custom_extra_body"
   },
   "allowed_umos": {

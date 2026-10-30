@@ -2,5 +2,5 @@ name: intent_router
 version: 0.1.0
 author: local
 repo: local
-desc: 使用独立 GPT-6 Astra low 规划器进行安全的自然语言能力路由，可 regex/light 切换。
+desc: 使用可配置的 low reasoning 规划器进行安全的自然语言能力路由，可 regex/light 切换。
 astrbot_version: ">=4.29.0"

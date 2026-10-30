@@ -60,7 +60,7 @@ def _has_external_context(event: AstrMessageEvent) -> bool:
 @star.register(
     name="intent_router",
     author="local",
-    desc="两档自然语言路由：现有正则或 GPT-6 Astra light",
+    desc="两档自然语言路由：现有正则或可配置的 light 模型",
     version="0.1.0",
 )
 class Main(star.Star):
@@ -85,8 +85,8 @@ class Main(star.Star):
         self.log_route_details = bool(cfg.get("log_route_details", True))
         self._provider_cfg = {
             "mode": self.mode,
-            "provider_id": str(cfg.get("provider_id") or "planner-astra-light"),
-            "model": str(cfg.get("model") or "gpt-6-astra"),
+            "provider_id": str(cfg.get("provider_id") or "planner-minimax-light"),
+            "model": str(cfg.get("model") or "MiniMax-M3.1-Flash"),
             "timeout": cfg.get("timeout_seconds", cfg.get("timeout", 3.0)),
             "min_confidence": cfg.get("min_confidence", 0.85),
             "max_input_chars": cfg.get("max_input_chars", 6000),

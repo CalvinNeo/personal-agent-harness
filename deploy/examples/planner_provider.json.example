@@ -1,11 +1,11 @@
 {
-  "id": "planner-astra-light",
+  "id": "planner-minimax-light",
   "type": "openai_chat_completion",
-  "name": "Astra Planner (low)",
+  "name": "MiniMax M3.1 Flash Planner (low)",
   "enable": false,
-  "api_base": "http://api.appintheloop.com",
-  "key": ["REPLACE_LOCALLY"],
-  "model": "gpt-6-astra",
+  "api_base": "https://api.minimax.cn/v1",
+  "key": ["$MINIMAX_API_KEY"],
+  "model": "MiniMax-M3.1-Flash",
   "custom_extra_body": {
     "reasoning_effort": "low",
     "max_tokens": 512

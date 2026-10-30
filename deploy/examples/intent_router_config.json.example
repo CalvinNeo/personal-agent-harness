@@ -1,7 +1,7 @@
 {
   "mode": "regex",
-  "provider_id": "planner-astra-light",
-  "model": "gpt-6-astra",
+  "provider_id": "planner-minimax-light",
+  "model": "MiniMax-M3.1-Flash",
   "allowed_umos": [],
   "allowed_senders": [],
   "timeout_seconds": 3.0,
