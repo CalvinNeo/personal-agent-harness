@@ -66,7 +66,7 @@ def inspect_path(label: str, name: str) -> list[str]:
     path = Path(name)
     if path.name.endswith(".example"):
         return []
-    if (path.name in BLOCKED_NAMES or path.name.endswith((".env", ".pem", ".key", ".log", ".db", ".sqlite", ".jsonl", ".pyc"))
+    if (path.name in BLOCKED_NAMES or path.name.endswith((".env", ".pem", ".key", ".log", ".db", ".sqlite", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".jsonl", ".pyc"))
             or path.name.startswith(".env") or path.name.endswith("_config.json")
             or set(path.parts) & BLOCKED_DIRS):
         return [f"{label}: runtime/credential path is not source"]

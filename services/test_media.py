@@ -103,7 +103,7 @@ class MediaTests(unittest.TestCase):
             index = command.index(str(root / "input"))
             self.assertEqual(command[index - 1], "--ro-bind")
             self.assertIn("--image", command)
-            self.assertIn('web_search="live"', command)
+            self.assertIn('web_search="disabled"', command)
             self.assertEqual(command[-2:], ["--", "-"])
             with self.assertRaises(ValueError):
                 r.command(root, "workspace-write", [Path("/etc/passwd")])

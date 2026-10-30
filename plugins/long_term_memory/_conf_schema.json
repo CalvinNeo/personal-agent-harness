@@ -1,0 +1,7 @@
+{
+  "allowed_umos": {"type": "list", "default": [], "description": "精确允许的 QQ 会话 UMO；空列表拒绝全部会话。"},
+  "allowed_senders": {"type": "list", "default": [], "description": "可选发送者白名单；空列表允许已授权群内成员，但每位成员记忆独立。"},
+  "memory_file": {"type": "string", "default": "/var/lib/astrbot/data/plugins/long_term_memory/memory.sqlite3", "description": "本机专用 SQLite 文件绝对路径；不纳入 Git。"},
+  "max_items": {"type": "int", "default": 100, "minimum": 1, "maximum": 100, "description": "每个会话与发送者最多保存的条目数。"},
+  "max_content_chars": {"type": "int", "default": 1000, "minimum": 40, "maximum": 1000, "description": "每条记忆的最大字符数。"}
+}

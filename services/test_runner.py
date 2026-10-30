@@ -63,7 +63,8 @@ class CommandSecurityTests(unittest.TestCase):
                 "--tmpfs", "/run/astrbot-codex", "--chdir", str(workspace), "--",
                 "/usr/local/bin/codex", "exec", "--ephemeral", "--json",
                 "--disable", "plugins", "--disable", "apps", "--skip-git-repo-check",
-                "--sandbox", mode, "-C", str(workspace), "-m", r.MODEL, "-",
+                "-c", 'default_permissions="' + ("codex-net-write" if mode == "workspace-write" else "codex-net-read") + '"',
+                "-c", 'web_search="disabled"', "-C", str(workspace), "-m", r.MODEL, "-",
             ]
             self.assertEqual(cmd, expected)
         with self.assertRaisesRegex(ValueError, "invalid mode"):

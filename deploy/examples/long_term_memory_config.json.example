@@ -1,0 +1,7 @@
+{
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "memory_file": "/var/lib/astrbot/data/plugins/long_term_memory/memory.sqlite3",
+  "max_items": 100,
+  "max_content_chars": 1000
+}

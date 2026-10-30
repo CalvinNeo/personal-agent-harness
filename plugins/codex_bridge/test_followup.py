@@ -45,7 +45,8 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_short_reply_routes_to_original_conversation_and_preserves_images(self):
         event = self.event()
-        self.context.get_all_stars.side_effect = AssertionError("must not inspect unrelated cached images")
+        image_selector = Mock(side_effect=AssertionError("must not inspect unrelated cached images"))
+        self.context.get_all_stars.return_value = [types.SimpleNamespace(star_cls=types.SimpleNamespace(select_for_task=image_selector))]
         await self.p.natural_status(event)
         calls = [call.args[0] for call in self.p._rpc.await_args_list]
         self.assertEqual([call["op"] for call in calls], ["status", "submit"])
@@ -58,7 +59,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.llm)
         self.assertIn("同会话续接", event.sent[0])
         self.assertIn("会话原图：1 张", event.sent[0])
-        self.context.get_all_stars.assert_not_called()
+        image_selector.assert_not_called()
         saved = json.loads(self.p.routes_file.read_text())["jobs"][0]
         self.assertEqual(saved["parent_job_id"], JID)
         self.assertNotIn("原回复报告", self.p.routes_file.read_text())

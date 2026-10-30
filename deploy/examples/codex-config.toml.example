@@ -1,12 +1,52 @@
 # Copy to /var/lib/codexrunner/codex/config.toml.
 # The runner passes HARNESS_MODEL via -m; no API key goes in this file.
 model_provider = "local_proxy"
+web_search = "disabled"
+# Root-level default; the runner selects the matching profile for each task.
+default_permissions = "codex-net-read"
 
 [model_providers.local_proxy]
 name = "Local model proxy"
 base_url = "http://127.0.0.1:6186/v1"
 wire_api = "responses"
+# The runner selects one of these profiles per task. Both permit outbound
+# command networking with all domains allowed. These network profiles do not
+# enforce the public_web MCP's GET-only or public-address checks.
+# Read-only tasks cannot write their workspace. Workspace-write tasks may
+# write their assigned workspace; image tasks use this profile to produce output.
+
+[permissions.codex-net-read]
+extends = ":read-only"
+description = "Read-only filesystem with Codex network access"
+[permissions.codex-net-read.network]
+enabled = true
+mode = "full"
+allow_local_binding = false
+[permissions.codex-net-read.network.domains]
+"*" = "allow"
+
+[permissions.codex-net-write]
+extends = ":workspace"
+description = "Assigned workspace write with Codex network access"
+[permissions.codex-net-write.network]
+enabled = true
+mode = "full"
+allow_local_binding = false
+[permissions.codex-net-write.network.domains]
+"*" = "allow"
 
 [features]
 plugins = false
 apps = false
+network_proxy = true
+
+# The runner sets filesystem permissions for each job and enables command
+# networking through the profiles above. This does not grant database access
+# to AstrBot's long-term memory; only its plugin writes that private state.
+# The root-managed MCP tools remain available for bounded public-page retrieval;
+# this server uses stdio, with no TCP listener.
+[mcp_servers.public_web]
+command = "/opt/astrbot/venv/bin/python"
+args = ["-I", "/opt/astrbot-codex-runner/public_web_mcp.py"]
+startup_timeout_sec = 20
+tool_timeout_sec = 40

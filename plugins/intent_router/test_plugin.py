@@ -74,7 +74,7 @@ def load_plugin():
         register=_decorator,
     )
     filters = types.SimpleNamespace(
-        EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1),
+        EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1, PRIVATE_MESSAGE=2),
         event_message_type=_decorator,
         on_llm_request=_decorator,
     )

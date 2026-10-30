@@ -52,7 +52,7 @@ def load():
     modules["astrbot.api"].star = types.SimpleNamespace(Star=type("Star", (), {"__init__": lambda self, context: setattr(self, "logger", logging.getLogger("codex-tests"))}), Context=object)
     modules["astrbot.api.event"].AstrMessageEvent = object
     modules["astrbot.api.event"].MessageChain = Chain
-    modules["astrbot.api.event"].filter = types.SimpleNamespace(platform_adapter_type=decorate, command=decorate, event_message_type=decorate, on_llm_request=decorate, on_decorating_result=decorate, after_message_sent=decorate, EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1))
+    modules["astrbot.api.event"].filter = types.SimpleNamespace(platform_adapter_type=decorate, command=decorate, event_message_type=decorate, on_llm_request=decorate, on_decorating_result=decorate, after_message_sent=decorate, EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1, PRIVATE_MESSAGE=2))
     modules["astrbot.api.event.filter"].PlatformAdapterType = types.SimpleNamespace(QQOFFICIAL=1)
     modules["astrbot.api.message_components"].Plain = Plain
     modules["astrbot.api.message_components"].Reply = Reply

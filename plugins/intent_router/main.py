@@ -187,9 +187,13 @@ class Main(star.Star):
         if self.log_route_details:
             self.logger.info("intent_router mode=light result=fallback code=%s", str(code)[:48])
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=110)
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE
+        | filter.EventMessageType.PRIVATE_MESSAGE,
+        priority=110,
+    )
     async def classify_group_message(self, event: AstrMessageEvent):
-        """Run before the existing priority-100/90 natural-language handlers."""
+        """Classify addressed group and allowlisted/private messages early."""
         await self._classify(event)
 
     @filter.on_llm_request(priority=110)

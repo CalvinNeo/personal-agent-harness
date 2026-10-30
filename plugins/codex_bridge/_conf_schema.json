@@ -1,9 +1,9 @@
 {
-  "allowed_umos": {"type": "list", "default": []},
+  "allowed_umos": {"type": "list", "default": [], "description": "Exact QQ session UMO allowlist. Use the complete value logged by AstrBot, such as private_qq_bot:GroupMessage:<group_openid> or private_qq_bot:FriendMessage:<user_openid>; an empty list denies all."},
   "allowed_senders": {"type": "list", "default": []},
   "write_senders": {"type": "list", "default": []},
   "socket_path": {"type": "string", "default": "/run/astrbot-codex/bridge.sock"},
-  "natural_language_enabled": {"type": "bool", "default": true, "description": "Recognize direct natural-language requests to use Codex; still requires an allowed group/user and @ mention."},
+  "natural_language_enabled": {"type": "bool", "default": true, "description": "Recognize direct natural-language Codex requests. Group messages require an @ mention; allowlisted private/C2C messages are already addressed."},
   "auto_complex_enabled": {"type": "bool", "default": true, "description": "Automatically route clear engineering and multi-step research requests to Codex in read-only mode."},
   "semantic_routing_enabled": {"type": "bool", "default": true, "description": "Let the chat model delegate an unfamiliar but clear complex request through a guarded no-argument tool."}
 }
