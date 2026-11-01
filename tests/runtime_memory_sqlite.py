@@ -20,6 +20,7 @@ from astrbot.core.star.star_handler import star_handlers_registry
 sys.path.insert(0, os.environ.get("MEMORY_PLUGIN_ROOT", str(Path(__file__).resolve().parents[1] / "plugins")))
 from codex_bridge.main import Main as Bridge
 from codex_bridge.core import owner_key
+from codex_bridge.memory import with_memory_context
 from intent_router.main import Main as Router
 from long_term_memory.main import Main as Memory
 
@@ -48,7 +49,7 @@ async def main():
     report = {"ok": False, "real_framework": True, "provider_network": False, "qq_messages_sent": 0,
               "real_runner_jobs_created": 0, "production_memory_writes": 0, "checks": []}
     destination = Path(os.environ["MEMORY_REPORT"])
-    source = event("办公地点：合成园区甲楼。住处：合成社区乙区。以上要加入长期记忆。", private=True)
+    source = event("公司在合成园区甲楼。家在合成社区乙区。以上要加入长期记忆。", private=True)
     allowed = [source.unified_msg_origin, event("").unified_msg_origin]
     provider = SimpleNamespace(text_chat=AsyncMock())
     context = SimpleNamespace(get_all_stars=Mock(return_value=[]), get_provider_by_id=Mock(return_value=provider), send_message=AsyncMock())
@@ -85,6 +86,18 @@ async def main():
             assert database.stat().st_mode & 0o777 == 0o600
             assert not list(Path(directory).rglob("*.md"))
             report["checks"].append("restart retains database row, duplicate handler does not send again, and no Markdown memory file exists")
+
+            for question in ("你记得我住在哪里、办公地点在哪里吗？", "明天从家出发去单位，帮我规划路线"):
+                followup = event(question, private=True)
+                request = ProviderRequest(prompt=question)
+                await memory.add_memory_context(followup, request)
+                assert rows[0][1] in request.system_prompt
+                assert request.func_tool is None
+                assert rows[0][1] in with_memory_context(context, followup, question, memory.logger)
+                followup.send.assert_not_awaited()
+            assert memory._rows(memory._owner(source)) == rows
+            bridge._rpc.assert_not_awaited()
+            report["checks"].append("location aliases reach ordinary chat and Codex after restart without writes, model calls or QQ sends")
 
             copied = event("办公地点", private=True, sender="synthetic-other")
             copied.set_extra("long_term_memory_request", source.get_extra("long_term_memory_request"))

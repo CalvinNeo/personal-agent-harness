@@ -108,6 +108,46 @@ class ParserTests(unittest.TestCase):
             with self.subTest(text=text): self.assertIsNotNone(m._SENSITIVE.search(text))
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_location_aliases_retrieve_without_literal_overlap(self):
+        content = '公司在合成园区甲楼。家在合成社区乙区'
+        await self.op('记住' + content)
+        question = '你记得我住在哪里、办公地点在哪里吗？'
+        topics = set(m._RETRIEVAL_TOPICS)
+        self.assertFalse((m._tokens(content) - topics) & (m._tokens(question) - topics))
+        source = Event(question)
+        before = self.plugin._rows(self.plugin._owner(source))
+        self.assertIn(content, self.plugin.memory_context_for_task(source, question))
+        request = types.SimpleNamespace(system_prompt='', func_tool=None)
+        await self.plugin.add_memory_context(source, request)
+        self.assertIn(content, request.system_prompt)
+        self.assertIsNone(request.func_tool)
+        self.assertEqual(self.plugin._rows(self.plugin._owner(source)), before)
+        self.assertFalse(source.sent)
+
+    async def test_commute_question_retrieves_both_scoped_locations(self):
+        home = '住址：合成住宅甲区'
+        office = '办公地点：合成园区乙栋'
+        await self.op('记住' + home)
+        await self.op('记住' + office)
+        question = '明天从家出发去公司，怎样走舒服些？'
+        self.plugin.allowed_umos.add('synthetic-other-scope')
+        context = self.plugin.memory_context_for_task(Event(question), question)
+        self.assertIn(home, context)
+        self.assertIn(office, context)
+        for source in (Event(question, sender='bob'), Event(question, umo='synthetic-other-scope'),
+                       Event(question, addressed=False)):
+            with self.subTest(sender=source.sender, umo=source.unified_msg_origin, addressed=source.is_at_or_wake_command):
+                self.assertEqual(self.plugin.memory_context_for_task(source, question), '')
+
+    async def test_location_aliases_do_not_match_unrelated_words(self):
+        await self.op('记住公司在合成园区甲楼，家在合成社区乙区')
+        for question in ('解释国家与专家两个词', '国家在哪里体现价值', '上市公司在哪里披露财报', '如何煎蛋', '翻译 hello'):
+            with self.subTest(question=question):
+                self.assertFalse(set(m._RETRIEVAL_TOPICS) & m._tokens(question))
+        for question in ('解释国家与专家两个词', '如何煎蛋', '翻译 hello'):
+            with self.subTest(question=question):
+                self.assertEqual(self.plugin.memory_context_for_task(Event(question), question), '')
+
     async def test_private_suffix_request_writes_sqlite_before_any_model(self):
         self.plugin.allowed_umos.add('synthetic-private')
         source = Event('办公地点：合成园区甲楼。住处：合成社区乙区。以上要加入长期记忆。', umo='synthetic-private')
