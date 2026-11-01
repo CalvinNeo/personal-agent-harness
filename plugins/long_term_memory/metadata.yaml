@@ -1,5 +1,5 @@
 name: long_term_memory
-version: 1.1.1
+version: 1.1.2
 author: local
 repo: local
 desc: 按 QQ 会话与发送者隔离的长期记忆，支持显式自然语言增删改查和相关背景检索。

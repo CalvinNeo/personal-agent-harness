@@ -101,7 +101,9 @@ async def main():
         assert len(plugin._reminders) == 1 and plugin._reminders[0]["attempts"] == 1
         assert plugin._reminders[0]["due_at"] > time.time()
         metadata = [h for h in star_handlers_registry if h.handler_module_path == "reminder.main"]
-        assert len(metadata) == 4, [h.handler_name for h in metadata]
+        assert {handler.handler_name for handler in metadata} == {
+            "remind", "list_reminders", "cancel_reminder", "natural_reminder", "provide_schedule_tool",
+        }
         natural = next(h for h in metadata if h.handler_name == "natural_reminder")
         assert natural.extras_configs["priority"] == 90
         assert all(f.filter(event(""), {}) for f in natural.event_filters)

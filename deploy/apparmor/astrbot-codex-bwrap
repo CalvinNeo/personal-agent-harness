@@ -1,0 +1,7 @@
+abi <abi/4.0>,
+include <tunables/global>
+profile astrbot-codex-bwrap /opt/astrbot-codex-runner/codex-bwrap flags=(unconfined) {
+  userns,
+  deny /var/lib/codexrunner/jobs{,/**} rwklmx,
+  deny /run/astrbot-codex/{bridge.sock,} rwklmx,
+}

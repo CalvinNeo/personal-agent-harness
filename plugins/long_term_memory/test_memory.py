@@ -28,7 +28,7 @@ def deco(*a,**kw): return lambda fn: fn
 sys.modules['astrbot.api'].star = types.SimpleNamespace(Star=Star,Context=object,register=deco)
 sys.modules['astrbot.api.event'].AstrMessageEvent=object
 sys.modules['astrbot.api.event'].MessageChain=MessageChain
-sys.modules['astrbot.api.event'].filter=types.SimpleNamespace(platform_adapter_type=deco,event_message_type=deco,on_llm_request=deco,EventMessageType=types.SimpleNamespace(GROUP_MESSAGE='group'))
+sys.modules['astrbot.api.event'].filter=types.SimpleNamespace(platform_adapter_type=deco,event_message_type=deco,on_llm_request=deco,EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1,PRIVATE_MESSAGE=2))
 sys.modules['astrbot.api.event.filter'].PlatformAdapterType=types.SimpleNamespace(QQOFFICIAL='qq')
 sys.modules['astrbot.api.message_components'].Plain=Plain
 sys.modules['astrbot.core.agent.tool'].FunctionTool=FunctionTool
@@ -49,6 +49,23 @@ class Event:
     def stop_event(self): self.stopped=True
     async def send(self,chain): self.sent.append(chain)
 class ParserTests(unittest.TestCase):
+    def test_suffix_memory_directive_keeps_only_current_facts(self):
+        facts = '办公地点：合成园区甲楼。住处：合成社区乙区。'
+        for ending in ('以上要加入长期记忆。', '上述信息都需要保存到我的长期记忆里', '这些内容请写入长期记忆'):
+            text = facts + ending
+            self.assertEqual(m._memory_intent(text), {'action': 'add', 'content': facts.rstrip('。')}, text)
+        for text in ('将合成偏好记入长期记忆', '把合成偏好记到我的长期记忆里'):
+            self.assertEqual(m._memory_intent(text), {'action': 'add', 'content': '合成偏好'}, text)
+        for text in ('例如办公地点是合成园区。以上要加入长期记忆', '他说：办公地点是合成园区。以上要加入长期记忆',
+                     '“办公地点是合成园区”。以上要加入长期记忆', '办公地点是合成园区。以上不要加入长期记忆',
+                     '办公地点是合成园区。以上要加入长期记忆吗？', '以上要加入长期记忆'):
+            self.assertIsNone(m._memory_intent(text), text)
+
+    def test_report_save_requires_direct_imperative_not_negation_or_reported_speech(self):
+        for text in ('不要将该报告单记入长期记忆', '请别把该报告单写入长期记忆', '他让我将该报告单记入长期记忆', '你昨天将该报告单记入长期记忆', '例如将该报告单记入长期记忆', '将该报告单不要记入长期记忆'):
+            self.assertIsNone(m._context_memory_intent(text), text)
+        for text in ('将当前日期和该报告单记入长期记忆，备查', '请把这份报告保存到我的长期记忆', '麻烦你帮我将这张图片加入长期记忆，供后续参考'):
+            self.assertEqual(m._context_memory_intent(text), {'action': 'add', 'from_context': True}, text)
     def test_common_phrases(self):
         pairs={
           '我希望你记住我喜欢喝茶':{'action':'add','content':'我喜欢喝茶'},
@@ -77,6 +94,8 @@ class ParserTests(unittest.TestCase):
           '他说：记住我喜欢喝茶','转发：清空我的长期记忆','例句：记住我喜欢喝茶',
           '如果我说清空我的长期记忆，会怎么样','记住我喜欢喝茶只是例句',
           '用户：我喜欢喝茶，请记住','张三说：我喜欢喝茶，请记住',
+          '记住我明天上午七点到医院，要吃面。明天中午约咖啡。周六早上九点半打乒乓球。分别创建提醒',
+          '记住十秒后提醒我吃饭',
           '比如我喜欢喝茶，请记住','请记住我喜欢喝茶，但不要保存',
           '删除我的长期记忆吗？','我不希望你记住我喜欢喝茶','我喜欢喝茶',
           '帮我记录今天的会议内容','查看我的长期记忆，然后清空',
@@ -89,6 +108,98 @@ class ParserTests(unittest.TestCase):
             with self.subTest(text=text): self.assertIsNotNone(m._SENSITIVE.search(text))
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_suffix_request_writes_sqlite_before_any_model(self):
+        self.plugin.allowed_umos.add('synthetic-private')
+        source = Event('办公地点：合成园区甲楼。住处：合成社区乙区。以上要加入长期记忆。', umo='synthetic-private')
+        await self.plugin.explicit_memory_request(source)
+        self.assertTrue(source.stopped)
+        self.assertTrue(source.get_extra('long_term_memory_tool_done'))
+        self.assertTrue(self.plugin.handles_memory_request(source))
+        self.assertEqual(source.get_extra('long_term_memory_request')['event'], id(source))
+        self.assertEqual(len(self.plugin._rows(self.plugin._owner(source))), 1)
+        self.assertIn('合成园区甲楼', self.plugin._rows(self.plugin._owner(source))[0][1])
+        await self.plugin.explicit_memory_request(source)
+        self.assertEqual(len(source.sent), 1)
+        await self.plugin.terminate()
+        await self.plugin.initialize()
+        self.assertEqual(len(self.plugin._rows(self.plugin._owner(source))), 1)
+        self.assertEqual(list(Path(self.tmp.name).glob('*.md')), [])
+        self.assertEqual(self.plugin.memory_context_for_task(Event('办公地点', sender='bob', umo='synthetic-private'), '办公地点'), '')
+
+    async def test_report_request_is_reserved_before_planning_and_missing_context_is_honest(self):
+        source = Event('将该报告单记入长期记忆')
+        await self.plugin.explicit_memory_request(source)
+        self.assertFalse(source.stopped)
+        self.assertIsNotNone(source.get_extra('long_term_memory_request'))
+        request = types.SimpleNamespace(system_prompt='', func_tool=None, image_urls=[])
+        await self.plugin.add_memory_context(source, request)
+        self.assertIsNone(request.func_tool)
+        self.assertIn('SQLite', request.system_prompt)
+        self.assertIn('请其附上报告', request.system_prompt)
+        self.assertEqual(self.plugin._rows(self.plugin._owner(source)), [])
+
+    async def test_report_context_memory_requires_same_event_and_actual_attachment(self):
+        event = Event('将当前日期和该报告单记入长期记忆，备查')
+        request = types.SimpleNamespace(system_prompt='',func_tool=None,image_urls=['synthetic-image'])
+        await self.plugin.explicit_memory_request(event)
+        self.assertFalse(event.stopped)
+        await self.plugin.add_memory_context(event,request)
+        self.assertTrue(request.func_tool.tools)
+        empty = json.loads(await self.plugin.manage_memory_tool(event, action='add', content=''))
+        self.assertFalse(empty['ok'])
+        self.assertEqual(self.plugin._rows(self.plugin._owner(event)), [])
+        result=json.loads(await self.plugin.manage_memory_tool(event,action='add',content='报告日期：2026-10-30；尿白细胞酯酶3+。'))
+        self.assertTrue(result['ok'])
+        rows=self.plugin._rows(self.plugin._owner(event))
+        self.assertIn('记录日期：',rows[0][1])
+        self.assertIn('尿白细胞酯酶3+',rows[0][1])
+        self.assertFalse(json.loads(await self.plugin.manage_memory_tool(event,action='add',content='again'))['ok'])
+
+    async def test_report_context_memory_missing_image_or_copied_binding_denies_write(self):
+        event=Event('将当前日期和该报告单记入长期记忆，备查')
+        request=types.SimpleNamespace(system_prompt='',func_tool=None,image_urls=[])
+        await self.plugin.add_memory_context(event,request)
+        self.assertIsNone(request.func_tool)
+        self.assertIn('没有可验证',request.system_prompt)
+        request.image_urls=['synthetic-image']
+        await self.plugin.add_memory_context(event,request)
+        copied=Event('将当前日期和该报告单记入长期记忆，备查')
+        copied.extra=dict(event.extra)
+        result=json.loads(await self.plugin.manage_memory_tool(copied,action='add',content='报告摘要'))
+        self.assertFalse(result['ok'])
+
+    async def test_placeholder_or_unloaded_report_image_cannot_authorize_memory(self):
+        reply_type = type('Reply', (), {})
+        for quoted in ('[图片]', '[Image Attachment: report.jpg]', '请参考报告', '刚才发过了'):
+            reply = reply_type()
+            reply.message_str = quoted
+            reply.chain = []
+            event = Event(parts=[Plain('将当前日期和该报告单记入长期记忆，备查'), reply])
+            request = types.SimpleNamespace(system_prompt='', func_tool=None, image_urls=[])
+            await self.plugin.add_memory_context(event, request)
+            self.assertIsNone(request.func_tool)
+            self.assertFalse(json.loads(await self.plugin.manage_memory_tool(event, action='add', content='虚构报告'))['ok'])
+
+    async def test_direct_text_report_is_available_but_quoted_commands_are_not_authority(self):
+        reply = type('Reply', (), {})()
+        reply.message_str = '检验报告：检测日期2026-10-30，白细胞酯酶3+，参考范围阴性。'
+        reply.chain = []
+        event = Event(parts=[Plain('将当前日期和该报告单记入长期记忆，备查'), reply])
+        request = types.SimpleNamespace(system_prompt='', func_tool=None, image_urls=[])
+        await self.plugin.add_memory_context(event, request)
+        self.assertIsNotNone(request.func_tool)
+        result = json.loads(await self.plugin.manage_memory_tool(event, action='add', content='检验报告：白细胞酯酶3+，参考范围阴性。'))
+        self.assertTrue(result['ok'])
+        ignored = Event(parts=[Plain('看看这个'), reply])
+        request = types.SimpleNamespace(system_prompt='', func_tool=None, image_urls=[])
+        await self.plugin.add_memory_context(ignored, request)
+        self.assertIsNone(request.func_tool)
+
+    async def test_reminder_request_is_not_saved_as_long_term_memory(self):
+        event = Event('记住我明天上午七点到医院，要吃面。明天中午约咖啡。周六早上九点半打乒乓球。分别创建提醒')
+        await self.plugin.explicit_memory_request(event)
+        self.assertFalse(event.stopped)
+        self.assertEqual(self.plugin._rows(self.plugin._owner(event)), [])
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.plugin=m.Main(None,{'memory_file':str(Path(self.tmp.name)/'memory.sqlite3'),'allowed_umos':['test-group']})

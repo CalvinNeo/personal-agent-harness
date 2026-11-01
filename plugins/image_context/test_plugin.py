@@ -1,10 +1,11 @@
 """Offline handler integration tests with minimal framework interfaces; no sends."""
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class FakeImage:
@@ -15,6 +16,16 @@ class FakeImage:
 class FakePlain:
     def __init__(self, text):
         self.text = text
+
+
+class FakeReply:
+    def __init__(self, chain=()):
+        self.chain = chain
+
+
+class FakeStar:
+    def __init__(self, context):
+        self.logger = Mock()
 
 
 class FakePart:
@@ -39,23 +50,25 @@ def load_plugin():
     package_name = "_image_context_test_package"
     pkg = types.ModuleType(package_name)
     pkg.__path__ = [str(Path(__file__).parent)]
-    star = types.SimpleNamespace(Star=type("Star", (), {"__init__": lambda self, context: None}),
+    star = types.SimpleNamespace(Star=FakeStar,
                                  Context=object, register=_decorator)
     filters = types.SimpleNamespace(CustomFilter=object, EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1),
                                     event_message_type=_decorator, custom_filter=_decorator, on_llm_request=_decorator)
     modules = {package_name: pkg}
     for name in ("astrbot", "astrbot.api", "astrbot.api.event", "astrbot.api.message_components",
                  "astrbot.core", "astrbot.core.agent", "astrbot.core.agent.message", "astrbot.core.provider",
-                 "astrbot.core.provider.entities"):
+                 "astrbot.core.provider.entities", "astrbot.core.utils", "astrbot.core.utils.astrbot_path"):
         modules[name] = types.ModuleType(name)
     modules["astrbot.api"].star = star
     modules["astrbot.api.event"].AstrMessageEvent = object
     modules["astrbot.api.event"].filter = filters
     modules["astrbot.api.message_components"].Image = FakeImage
     modules["astrbot.api.message_components"].Plain = FakePlain
+    modules["astrbot.api.message_components"].Reply = FakeReply
     modules["astrbot.core.agent.message"].ImageURLPart = FakeImagePart
     modules["astrbot.core.agent.message"].TextPart = FakePart
     modules["astrbot.core.provider.entities"].ProviderRequest = object
+    modules["astrbot.core.utils.astrbot_path"].get_astrbot_temp_path = tempfile.gettempdir
     with patch.dict(sys.modules, modules):
         spec = importlib.util.spec_from_file_location(package_name + ".main", Path(__file__).parent / "main.py")
         mod = importlib.util.module_from_spec(spec)
@@ -160,14 +173,20 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.remember_images(event)
         self.assertEqual(len(self.plugin._cache._sessions), 0)
 
-    async def test_light_route_allows_unmatched_image_wording(self):
+    async def test_implicit_reference_works_without_planner(self):
         await self.plugin.remember_images(FakeEvent(images=[ref(1)]))
-        event, req = FakeEvent("看看这张", addressed=True), request()
-        event.set_extra("intent_router_accepted", True)
-        event.set_extra("intent_router_route", "image")
+        event, req = FakeEvent("看看这张图", addressed=True), request()
         await self.plugin.add_image_context(event, req)
         visual = [part for part in req.extra_user_content_parts if isinstance(part, FakeImagePart)]
         self.assertEqual([part.image_url.url for part in visual], [ref(1)])
+
+    async def test_planner_route_alone_cannot_attach_old_images(self):
+        await self.plugin.remember_images(FakeEvent(images=[ref(1)]))
+        event, req = FakeEvent("今天吃什么", addressed=True), request()
+        event.set_extra("intent_router_accepted", True)
+        event.set_extra("intent_router_route", "image")
+        await self.plugin.add_image_context(event, req)
+        self.assertEqual(req.extra_user_content_parts, [])
 
     async def test_ordinary_llm_request_unchanged(self):
         event, req = FakeEvent("今天要做什么"), request()

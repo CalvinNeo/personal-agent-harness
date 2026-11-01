@@ -2,5 +2,8 @@
   "allowed_umos": [],
   "allowed_senders": [],
   "write_senders": [],
-  "socket_path": "/run/astrbot-codex/bridge.sock"
+  "socket_path": "/run/astrbot-codex/bridge.sock",
+  "natural_language_enabled": true,
+  "auto_complex_enabled": true,
+  "semantic_routing_enabled": true
 }

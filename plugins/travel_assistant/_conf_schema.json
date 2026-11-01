@@ -1,0 +1,22 @@
+{
+  "allowed_umos": {
+    "description": "允许出行查询的精确 QQ UMO；空列表拒绝全部，不扩大原会话权限",
+    "type": "list",
+    "default": []
+  },
+  "allowed_senders": {
+    "description": "可选发送者白名单；空列表表示只限制已批准 UMO",
+    "type": "list",
+    "default": []
+  },
+  "flight_proxy": {
+    "description": "仅机票公开页面使用的已有本机代理；只允许空值或 http://127.0.0.1:7890，不是全局代理",
+    "type": "string",
+    "default": ""
+  },
+  "data_dir": {
+    "description": "出行数据与短期结果缓存目录；留空使用 AstrBot plugins_data/travel_assistant",
+    "type": "string",
+    "default": ""
+  }
+}

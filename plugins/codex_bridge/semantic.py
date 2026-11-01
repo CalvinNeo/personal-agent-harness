@@ -50,6 +50,8 @@ def semantic_eligible(text: str) -> bool:
         return False
     if codex_opt_out(direct):
         return False
+    if re.search(r"(?:小红书|xhs|rednote).{0,20}(?:登录|扫码|登录态)|(?:已|已经).{0,8}(?:扫码|登录).{0,12}(?:状态|确认)", direct, re.I) and not re.search(r"实现|开发|编写|修改.{0,12}(?:代码|程序)|implement|develop", direct, re.I):
+        return False
     if re.search(r"(?:提醒|通知|叫)(?:一下|下)?我|(?:设置|安排|定|创建).{0,24}(?:提醒|闹钟)|\bremind\s+me\b", direct, re.I):
         return False
     if not re.search(r"codex", direct, re.I) and re.search(r"(?:刚才|刚发|这|那|上面|图片|截图|照片).{0,12}(?:图|照片|截图)|图发(?:给)?你|(?:图|截图|照片)(?:中|里|上)", direct):

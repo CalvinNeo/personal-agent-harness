@@ -1,0 +1,6 @@
+{
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "flight_proxy": "http://127.0.0.1:7890",
+  "data_dir": "/var/lib/astrbot/data/travel_assistant"
+}

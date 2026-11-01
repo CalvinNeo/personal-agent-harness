@@ -20,6 +20,11 @@ semantic = module
 
 
 class SemanticTests(unittest.TestCase):
+    def test_xhs_account_checks_stay_with_local_tools(self):
+        for text in ("已登录，检查下小红书的登录态", "我已经扫码登录了，你检查下状态", "用 Codex 检查小红书登录态"):
+            self.assertFalse(semantic.semantic_eligible(text))
+        self.assertTrue(semantic.semantic_eligible("请用 Codex 实现小红书登录功能"))
+
     def test_tool_cannot_accept_model_generated_task_or_scope(self):
         self.assertEqual(semantic.TOOL_SCHEMA["properties"], {})
         self.assertIs(semantic.TOOL_SCHEMA["additionalProperties"], False)

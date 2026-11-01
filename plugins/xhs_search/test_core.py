@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location("xhs_core_tests", Path(__file__).with_name("core.py"))
+spec = importlib.util.spec_from_file_location("xhs_core_tests", Path(__file__).resolve().with_name("core.py"))
 core = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core)
 SYNTHETIC_TOKEN = "synthetic-test-credential-only"
@@ -228,6 +228,27 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.XHSError) as raised:
             self.client(envelope({"is_logged_in": True})).login_qr()
         self.assertEqual(raised.exception.code, "already_logged_in")
+
+    def test_account_status_details_discard_identity_and_untrusted_fields(self):
+        details = self.client(envelope({"is_logged_in": False, "login_pending": True, "username": "private", "user_id": "private"})).login_details()
+        self.assertEqual(details, {"is_logged_in": False, "login_pending": True})
+        self.assertEqual(self.client(envelope({"is_logged_in": True})).login_details(), {"is_logged_in": True, "login_pending": False})
+
+    def test_safe_login_errors_are_not_misreported_as_generic_unavailability(self):
+        for code, expected in (("LOGIN_REQUIRED", "login_required"), ("LOGIN_PENDING", "login_pending")):
+            def opener(request, **kwargs):
+                raise urllib.error.HTTPError(request.full_url, 409, "private detail", {}, io.BytesIO(json.dumps({"code": code, "details": SYNTHETIC_TOKEN}).encode()))
+            client = core.XHSClient(endpoint="http://127.0.0.1:18060", token_file=str(self.token), opener=opener)
+            with self.assertRaises(core.XHSError) as caught:
+                client.search("synthetic public query")
+            self.assertEqual(caught.exception.code, expected)
+            self.assertNotIn(SYNTHETIC_TOKEN, str(caught.exception))
+        def unavailable(request, **kwargs):
+            raise urllib.error.HTTPError(request.full_url, 500, "private detail", {}, io.BytesIO(b'{"code":"STATUS_CHECK_FAILED"}'))
+        client = core.XHSClient(endpoint="http://127.0.0.1:18060", token_file=str(self.token), opener=unavailable)
+        with self.assertRaises(core.XHSError) as caught:
+            client.login_details()
+        self.assertEqual(caught.exception.code, "status_unavailable")
 
     def test_default_transport_never_follows_redirect_or_uses_proxy(self):
         received = []

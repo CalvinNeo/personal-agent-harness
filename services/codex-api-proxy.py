@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 UPSTREAM = os.environ.get("HARNESS_UPSTREAM_ORIGIN", "").rstrip("/")
 TOKEN_FILE = "/var/lib/codexproxy/upstream-token"
 LISTEN = ("127.0.0.1", 6186)
-MAX_BODY = 2 * 1024 * 1024
+MAX_BODY = 8 * 1024 * 1024
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self): self.forward()

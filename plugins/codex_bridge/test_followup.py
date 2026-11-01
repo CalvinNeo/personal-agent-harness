@@ -96,6 +96,91 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["prompt"], "原图日期有的，你再看看")
         self.assertIn("同会话续接", event.sent[0])
 
+    async def test_retry_resolves_legacy_assistant_quote_by_labeled_task_id(self):
+        self.route()
+        quoted = ("已看到你引用的任务：用 Codex 找一下好玩的南京两人剧本杀。\n"
+                  "上次任务编号是：\n`12345678abcdef01`\n"
+                  "可用命令：`/codex status 12345678` 或 `/codex result 12345678`")
+        for phrase in ("重新提交", "再提交", "重试", "重试刚才的任务", "重新执行", "继续刚才的 Codex 任务", "再跑一次"):
+            event = Event(phrase, quoted=quoted, message_id=phrase)
+            await self.p.natural_status(event)
+            payload = self.p._rpc.await_args_list[-1].args[0]
+            self.assertEqual(payload["op"], "submit", phrase)
+            self.assertEqual(payload["parent_job_id"], JID, phrase)
+            self.assertEqual(payload["prompt"], phrase, phrase)
+            self.assertEqual(payload["mode"], "read-only", phrase)
+
+    async def test_retry_ignores_unlabeled_hex_and_non_codex_task_references(self):
+        self.route()
+        for quote in (
+            "普通答复里有一串值 12345678abcdef01，但没有任务编号标签",
+            "上次任务编号是：12345678abcdef01",
+        ):
+            event = Event("重新提交", quoted=quote)
+            await self.p.natural_status(event)
+            self.assertTrue(event.stopped)
+            self.assertIn("请引用要重新提交的 Codex 任务回复", event.sent[0])
+        self.p._rpc.assert_not_awaited()
+
+    async def test_retry_phrase_without_quoted_task_context_gets_safe_clarification(self):
+        event = Event("重新提交")
+        await self.p.natural_status(event)
+        self.assertTrue(event.stopped)
+        self.assertIn("请引用要重新提交的 Codex 任务回复", event.sent[0])
+        self.p._rpc.assert_not_awaited()
+
+    async def test_retry_reference_cannot_bind_another_owner_route(self):
+        self.route(owner=plugin.owner_key(UMO, "bob"))
+        event = Event("重新提交", quoted="Codex 上次任务编号是：`12345678abcdef01`")
+        await self.p.natural_status(event)
+        self.assertIn("请引用要重新提交的 Codex 任务回复", event.sent[0])
+        self.p._rpc.assert_not_awaited()
+
+    async def test_retry_short_prefix_is_rejected_when_owner_has_multiple_matches(self):
+        self.route()
+        other = dict(self.p.routes[JID])
+        other.update(id="12345678ffffffff", owner=self.owner)
+        self.p.routes[other["id"]] = other
+        event = Event("重新提交", quoted="Codex 上次任务编号是：`12345678`")
+        await self.p.natural_status(event)
+        self.assertIn("多个 Codex 会话", event.sent[0])
+        self.p._rpc.assert_not_awaited()
+
+    async def test_retry_uses_status_command_reference_without_prose_label(self):
+        self.route()
+        event = Event("重试", quoted="可用命令：`/codex status 12345678`")
+        event.set_extra("intent_router_accepted", True)
+        event.set_extra("intent_router_route", "clarify")
+        await self.p.natural_status(event)
+        self.assertEqual(self.p._rpc.call_args.args[0]["parent_job_id"], JID)
+        self.assertTrue(event.stopped)
+        self.assertFalse(event.llm)
+
+    async def test_legacy_task_label_binds_unfamiliar_continuation_wording(self):
+        self.route()
+        quote = "Codex 上次任务编号是：`12345678abcdef01`"
+        event = Event("请把这个信息再确认一遍", quoted=quote)
+        await self.p.natural_status(event)
+        self.assertEqual(self.p._rpc.call_args.args[0]["op"], "submit")
+        self.assertEqual(self.p._rpc.call_args.args[0]["parent_job_id"], JID)
+        self.assertEqual(self.p._rpc.call_args.args[0]["prompt"], "请把这个信息再确认一遍")
+
+    async def test_retry_prohibitions_do_not_create_followup_job(self):
+        self.route()
+        for phrase in ("不要重新提交", "先别重试", "取消重新执行", "不要用 Codex"):
+            event = Event(phrase, quoted="Codex 上次任务编号是：`12345678abcdef01`")
+            await self.p.natural_status(event)
+            self.assertFalse(event.stopped, phrase)
+        self.p._rpc.assert_not_awaited()
+
+    async def test_legacy_task_label_binds_natural_status_query(self):
+        self.route()
+        event = Event("看下现在状态", quoted="Codex 上次任务编号是：`12345678abcdef01`")
+        await self.p.natural_status(event)
+        self.p._rpc.assert_awaited_once_with({"op": "status", "owner": self.owner, "job_id": JID})
+        self.assertTrue(event.stopped)
+        self.assertFalse(event.llm)
+
     async def test_message_id_status_query_is_not_submitted_as_followup(self):
         self.route(ids=["qq-image-message"])
         event = Event("看下状态", quoted="[图片]")

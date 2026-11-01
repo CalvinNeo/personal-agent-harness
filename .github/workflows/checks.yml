@@ -12,10 +12,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt
       - run: python scripts/privacy_check.py --history
-      - run: python -m unittest discover -s plugins/reminder -p 'test_*.py' -v
-      - run: python -m unittest discover -s plugins/image_context -p 'test_*.py' -v
-      - run: python -m unittest discover -s plugins/intent_router -p 'test_*.py' -v
-      - run: python -m unittest discover -s plugins/xhs_search -p 'test_*.py' -v
-      - run: python -m unittest discover -s tests -p 'test_qq_image_log_patch.py' -v
-      - run: python -m unittest discover -s tests -p 'test_portable_*.py' -v
+      - run: python scripts/run_checks.py

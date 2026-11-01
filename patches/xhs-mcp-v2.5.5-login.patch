@@ -1,21 +1,226 @@
+--- a/cookies/cookies.go
++++ b/cookies/cookies.go
+@@ -107,12 +107,28 @@
+ 	}
+ 
+ 	if dir := filepath.Dir(c.path); dir != "" && dir != "." {
+-		if err := os.MkdirAll(dir, 0755); err != nil {
++		if err := os.MkdirAll(dir, 0700); err != nil {
+ 			return errors.Wrap(err, "create cookies dir failed")
+ 		}
+ 	}
+ 
+-	return os.WriteFile(c.path, data, 0644)
++	file, err := os.CreateTemp(filepath.Dir(c.path), ".session-*")
++	if err != nil {
++		return errors.Wrap(err, "create session file failed")
++	}
++	temporary := file.Name()
++	defer os.Remove(temporary)
++	defer file.Close()
++	if _, err := file.Write(data); err != nil {
++		return errors.Wrap(err, "write session file failed")
++	}
++	if err := file.Sync(); err != nil {
++		return errors.Wrap(err, "sync session file failed")
++	}
++	if err := file.Close(); err != nil {
++		return errors.Wrap(err, "close session file failed")
++	}
++	return os.Rename(temporary, c.path)
+ }
+ 
+ // DeleteCookies 删除 cookies 文件。
+--- a/cookies/cookies_test.go
++++ b/cookies/cookies_test.go
+@@ -172,3 +172,22 @@
+ 	assert.NoError(t, json.Unmarshal(got, &cks))
+ 	assert.Equal(t, "a", cks[0]["name"])
+ }
++
++func TestSaveCookiesPrivateAtomicReplacement(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "session.json")
++	assert.NoError(t, os.WriteFile(path, []byte(`[]`), 0644))
++	store := NewLoadCookie(path)
++	assert.NoError(t, store.SaveCookies([]byte(`[{"name":"web_session","value":"synthetic"}]`)))
++	info, err := os.Stat(path)
++	assert.NoError(t, err)
++	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
++	previous, err := os.ReadFile(path)
++	assert.NoError(t, err)
++	assert.Error(t, store.SaveCookies([]byte(`invalid-json`)))
++	after, err := os.ReadFile(path)
++	assert.NoError(t, err)
++	assert.Equal(t, previous, after)
++	files, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".session-*"))
++	assert.NoError(t, err)
++	assert.Empty(t, files)
++}
+--- a/handlers_api.go
++++ b/handlers_api.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"errors"
+ 	"net/http"
+ 	"strconv"
+ 
+@@ -60,6 +61,10 @@
+ func (s *AppServer) getLoginQrcodeHandler(c *gin.Context) {
+ 	result, err := s.xiaohongshuService.GetLoginQrcode(c.Request.Context())
+ 	if err != nil {
++		if errors.Is(err, errLoginPending) {
++			respondError(c, http.StatusConflict, "LOGIN_PENDING", "扫码确认仍在进行", "")
++			return
++		}
+ 		respondError(c, http.StatusInternalServerError, "STATUS_CHECK_FAILED",
+ 			"获取登录二维码失败", err.Error())
+ 		return
+@@ -162,6 +167,14 @@
+ 
+ 	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
+ 	if err != nil {
++		if errors.Is(err, errLoginRequired) {
++			respondError(c, http.StatusConflict, "LOGIN_REQUIRED", "小红书尚未登录", "")
++			return
++		}
++		if errors.Is(err, errLoginPending) {
++			respondError(c, http.StatusConflict, "LOGIN_PENDING", "扫码确认仍在进行", "")
++			return
++		}
+ 		respondError(c, http.StatusInternalServerError, "SEARCH_FEEDS_FAILED",
+ 			"搜索Feeds失败", err.Error())
+ 		return
+--- a/login_session.go
++++ b/login_session.go
+@@ -11,6 +11,29 @@
+ 	mu     sync.Mutex
+ 	seq    uint64
+ 	cancel func()
++}
++
++func (l *loginSessions) pending() bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return l.cancel != nil
++}
++
++func (l *loginSessions) current(seq uint64) bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return l.seq == seq && l.cancel != nil
++}
++
++func (l *loginSessions) stop() {
++	l.mu.Lock()
++	cancel := l.cancel
++	l.seq++
++	l.cancel = nil
++	l.mu.Unlock()
++	if cancel != nil {
++		cancel()
++	}
+ }
+ 
+ // start 结束上一个待扫码会话（如果有），登记新的，返回本次会话的序号。
+--- a/login_session_test.go
++++ b/login_session_test.go
+@@ -12,6 +12,20 @@
+ // 这是浏览器不再堆积的依据：每个待扫码会话都占着一个浏览器活到超时为止，
+ // 只要新会话没能关掉旧的，进程就会累积。
+ func TestLoginSessions(t *testing.T) {
++	t.Run("pending and current track only the live session", func(t *testing.T) {
++		var sessions loginSessions
++		assert.False(t, sessions.pending())
++		oldSeq := sessions.start(func() {})
++		assert.True(t, sessions.pending())
++		assert.True(t, sessions.current(oldSeq))
++		newSeq := sessions.start(func() {})
++		assert.False(t, sessions.current(oldSeq))
++		sessions.finish(oldSeq)
++		assert.True(t, sessions.current(newSeq))
++		sessions.finish(newSeq)
++		assert.False(t, sessions.pending())
++		assert.False(t, sessions.current(newSeq))
++	})
+ 	t.Run("开新会话会关掉上一个", func(t *testing.T) {
+ 		var l loginSessions
+ 		closed := 0
 --- a/service.go
 +++ b/service.go
-@@ -5,6 +5,7 @@
+@@ -3,8 +3,11 @@
+ import (
+ 	"context"
  	"encoding/json"
++	"errors"
  	"fmt"
  	"os"
++	"strings"
 +	"sync"
  	"time"
  
  	"github.com/go-rod/rod"
-@@ -133,30 +134,85 @@
+@@ -20,8 +23,12 @@
+ 
+ // XiaohongshuService 小红书业务服务
+ type XiaohongshuService struct {
+-	logins loginSessions
+-}
++	logins  loginSessions
++	loginMu sync.Mutex
++}
++
++var errLoginRequired = errors.New("login required")
++var errLoginPending = errors.New("login confirmation is pending")
+ 
+ // NewXiaohongshuService 创建小红书服务实例
+ func NewXiaohongshuService() *XiaohongshuService {
+@@ -42,9 +49,10 @@
+ 
+ // LoginStatusResponse 登录状态响应
+ type LoginStatusResponse struct {
+-	IsLoggedIn bool   `json:"is_logged_in"`
+-	Username   string `json:"username,omitempty"` // 当前登录账号的昵称
+-	UserID     string `json:"user_id,omitempty"`  // 用户唯一标识（个人主页 URL 中的 ID）
++	IsLoggedIn   bool   `json:"is_logged_in"`
++	LoginPending bool   `json:"login_pending"`
++	Username     string `json:"username,omitempty"` // 当前登录账号的昵称
++	UserID       string `json:"user_id,omitempty"`  // 用户唯一标识（个人主页 URL 中的 ID）
+ }
+ 
+ // LoginQrcodeResponse 登录扫码二维码
+@@ -96,6 +104,9 @@
+ 
+ // DeleteCookies 删除 cookies 文件，用于登录重置
+ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
++	s.loginMu.Lock()
++	defer s.loginMu.Unlock()
++	s.logins.stop()
+ 	cookiePath := cookies.GetCookiesFilePath()
+ 	cookieLoader := cookies.NewLoadCookie(cookiePath)
+ 	return cookieLoader.DeleteCookies()
+@@ -103,6 +114,16 @@
+ 
+ // CheckLoginStatus 检查登录状态
+ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
++	if s.logins.pending() {
++		return &LoginStatusResponse{LoginPending: true}, nil
++	}
++	loaded, err := storedLoginCookies()
++	if err != nil {
++		return nil, err
++	}
++	if !loaded {
++		return &LoginStatusResponse{}, nil
++	}
+ 	b := newBrowser()
+ 	defer b.Close()
+ 
+@@ -133,30 +154,90 @@
  	return response, nil
  }
  
--// GetLoginQrcode 获取登录的扫码二维码
--func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
--	b := newBrowser()
--	page := b.NewPage()
 +// qrBrowserResources owns a browser/page until a pending-login goroutine is
 +// successfully started. The sync.Once makes outer error cleanup and the
 +// goroutine's eventual cleanup safe to race.
@@ -25,11 +230,7 @@
 +	once      sync.Once
 +	handedOff bool
 +}
- 
--	deferFunc := func() {
--		_ = page.Close()
--		b.Close()
--	}
++
 +func (r *qrBrowserResources) close() {
 +	r.once.Do(func() {
 +		if r.page != nil {
@@ -46,12 +247,7 @@
 +		}
 +	})
 +}
- 
--	loginAction := xiaohongshu.NewLogin(page)
--
--	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
--	if err != nil || loggedIn {
--		defer deferFunc()
++
 +func newQRBrowser() (browser *headless_browser.Browser, err error) {
 +	defer func() {
 +		if recover() != nil {
@@ -72,12 +268,25 @@
 +	return browser.NewPage(), nil
 +}
 +
-+// GetLoginQrcode 获取登录的扫码二维码
-+func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
+ // GetLoginQrcode 获取登录的扫码二维码
+ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
+-	b := newBrowser()
+-	page := b.NewPage()
+-
+-	deferFunc := func() {
+-		_ = page.Close()
+-		b.Close()
+-	}
+-
++	s.loginMu.Lock()
++	defer s.loginMu.Unlock()
++	if s.logins.pending() {
++		return nil, errLoginPending
++	}
 +	b, err := newQRBrowser()
 +	if err != nil {
 +		return nil, err
- 	}
++	}
 +	resources := &qrBrowserResources{browser: b}
 +	defer func() {
 +		if !resources.handedOff {
@@ -86,21 +295,26 @@
 +	}()
 +
 +	page, err := newQRPage(b)
- 	if err != nil {
- 		return nil, err
- 	}
-+	resources.page = page
- 
--	timeout := 4 * time.Minute
-+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-+	defer cancel()
-+	loginAction := xiaohongshu.NewLogin(page)
-+	img, loggedIn, err := loginAction.FetchQrcodeImage(fetchCtx)
 +	if err != nil {
 +		return nil, err
 +	}
++	resources.page = page
++
++	fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
++	defer cancel()
+ 	loginAction := xiaohongshu.NewLogin(page)
+-
+-	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
+-	if err != nil || loggedIn {
+-		defer deferFunc()
+-	}
++	img, loggedIn, err := loginAction.FetchQrcodeImage(fetchCtx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
  
-+	timeout := 4 * time.Minute
+ 	timeout := 4 * time.Minute
+-
  	if !loggedIn {
 -		s.waitScanInBackground(loginAction, page, deferFunc, timeout)
 +		// waitScanInBackground assumes ownership only after its setup returns.
@@ -109,74 +323,344 @@
  	}
  
  	return &LoginQrcodeResponse{
---- a/xiaohongshu/login.go
-+++ b/xiaohongshu/login.go
-@@ -18,22 +18,23 @@
+@@ -183,13 +264,23 @@
+ 	logrus.Infof("等待扫码登录，会话 #%d，超时 %s", seq, timeout)
+ 
+ 	go func() {
++		defer func() {
++			if recover() != nil {
++				logrus.Error("login worker failed; no login success was recorded")
++			}
++		}()
+ 		defer closeBrowser()
+ 		defer cancel()
+ 		defer s.logins.finish(seq)
+ 
+ 		if loginAction.WaitForLogin(ctxTimeout) {
++			s.loginMu.Lock()
++			defer s.loginMu.Unlock()
++			if ctxTimeout.Err() != nil || !s.logins.current(seq) {
++				return
++			}
+ 			if err := saveCookies(page); err != nil {
+-				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", seq, err)
++				logrus.Errorf("login cookie persistence failed for session #%d", seq)
+ 				return
+ 			}
+ 			logrus.Infof("扫码登录成功，cookies 已保存，会话 #%d", seq)
+@@ -390,6 +481,16 @@
  }
  
+ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
++	if s.logins.pending() {
++		return nil, errLoginPending
++	}
++	loaded, err := storedLoginCookies()
++	if err != nil {
++		return nil, err
++	}
++	if !loaded {
++		return nil, errLoginRequired
++	}
+ 	b := newBrowser()
+ 	defer b.Close()
+ 
+@@ -635,8 +736,45 @@
+ 		return err
+ 	}
+ 
++	if !hasLoginCookie(data) {
++		return fmt.Errorf("authenticated session cookie is missing")
++	}
+ 	cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+ 	return cookieLoader.SaveCookies(data)
++}
++
++func hasLoginCookie(data []byte) bool {
++	var entries []struct {
++		Name    string  `json:"name"`
++		Value   string  `json:"value"`
++		Domain  string  `json:"domain"`
++		Expires float64 `json:"expires"`
++	}
++	if json.Unmarshal(data, &entries) != nil {
++		return false
++	}
++	for _, entry := range entries {
++		domain := strings.ToLower(strings.TrimPrefix(entry.Domain, "."))
++		if entry.Name == "web_session" && entry.Value != "" && (domain == "xiaohongshu.com" || strings.HasSuffix(domain, ".xiaohongshu.com")) && (entry.Expires <= 0 || entry.Expires > float64(time.Now().Unix())) {
++			return true
++		}
++	}
++	return false
++}
++
++func storedLoginCookies() (bool, error) {
++	data, err := cookies.NewLoadCookie(cookies.GetCookiesFilePath()).LoadCookies()
++	if errors.Is(err, os.ErrNotExist) {
++		return false, nil
++	}
++	if err != nil {
++		return false, err
++	}
++	var entries []json.RawMessage
++	if err := json.Unmarshal(data, &entries); err != nil || strings.TrimSpace(string(data)) == "null" {
++		return false, errors.New("stored session file is invalid")
++	}
++	return hasLoginCookie(data), nil
+ }
+ 
+ // withBrowserPage 执行需要浏览器页面的操作的通用函数
+--- /dev/null
++++ b/service_login_test.go
+@@ -0,0 +1,129 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func TestHasLoginCookie(t *testing.T) {
++	cases := []struct {
++		name string
++		data string
++		want bool
++	}{
++		{name: "empty", data: `[]`},
++		{name: "missing authentication", data: `[{"name":"a1","value":"synthetic"}]`},
++		{name: "empty authentication", data: `[{"name":"web_session","value":"","domain":".xiaohongshu.com"}]`},
++		{name: "expired", data: `[{"name":"web_session","value":"synthetic","domain":".xiaohongshu.com","expires":1}]`},
++		{name: "wrong domain", data: `[{"name":"web_session","value":"synthetic","domain":"xiaohongshu.com.example.org"}]`},
++		{name: "missing domain", data: `[{"name":"web_session","value":"synthetic"}]`},
++		{name: "session", data: `[{"name":"web_session","value":"synthetic","domain":".xiaohongshu.com","expires":-1}]`, want: true},
++		{name: "future", data: fmt.Sprintf(`[{"name":"web_session","value":"synthetic","domain":"www.xiaohongshu.com","expires":%d}]`, time.Now().Add(time.Hour).Unix()), want: true},
++		{name: "invalid", data: `{"cookies":`},
++	}
++	for _, item := range cases {
++		t.Run(item.name, func(t *testing.T) {
++			require.Equal(t, item.want, hasLoginCookie([]byte(item.data)))
++		})
++	}
++}
++
++func TestStoredLoginCookiesAndFastStatus(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "session.json")
++	t.Setenv("COOKIES_PATH", path)
++	loaded, err := storedLoginCookies()
++	require.NoError(t, err)
++	require.False(t, loaded)
++	service := NewXiaohongshuService()
++	for _, data := range []string{`[]`, `{"version":2,"seed":123,"cookies":[]}`, `[{"name":"web_session","value":"synthetic","domain":".xiaohongshu.com","expires":1}]`} {
++		require.NoError(t, os.WriteFile(path, []byte(data), 0600))
++		started := time.Now()
++		status, err := service.CheckLoginStatus(context.Background())
++		require.NoError(t, err)
++		require.False(t, status.IsLoggedIn)
++		require.False(t, status.LoginPending)
++		require.Less(t, time.Since(started), time.Second)
++		_, err = service.SearchFeeds(context.Background(), "synthetic query")
++		require.ErrorIs(t, err, errLoginRequired)
++	}
++	require.NoError(t, os.WriteFile(path, []byte(`{"version":2,"cookies":`), 0600))
++	_, err = service.CheckLoginStatus(context.Background())
++	require.Error(t, err)
++	_, err = service.SearchFeeds(context.Background(), "synthetic query")
++	require.Error(t, err)
++	require.False(t, errors.Is(err, errLoginRequired))
++}
++
++func TestPendingLoginStatusAndLogout(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "session.json")
++	t.Setenv("COOKIES_PATH", path)
++	service := NewXiaohongshuService()
++	cancelled := false
++	seq := service.logins.start(func() { cancelled = true })
++	status, err := service.CheckLoginStatus(context.Background())
++	require.NoError(t, err)
++	require.True(t, status.LoginPending)
++	require.False(t, status.IsLoggedIn)
++	_, err = service.GetLoginQrcode(context.Background())
++	require.ErrorIs(t, err, errLoginPending)
++	_, err = service.SearchFeeds(context.Background(), "synthetic query")
++	require.ErrorIs(t, err, errLoginPending)
++	require.NoError(t, service.DeleteCookies(context.Background()))
++	require.True(t, cancelled)
++	require.False(t, service.logins.pending())
++	require.False(t, service.logins.current(seq))
++	service.logins.finish(seq)
++	require.False(t, service.logins.pending())
++}
++
++func TestLoginHTTPStatesWithoutBrowser(t *testing.T) {
++	t.Setenv("COOKIES_PATH", filepath.Join(t.TempDir(), "missing.json"))
++	gin.SetMode(gin.TestMode)
++	service := NewXiaohongshuService()
++	server := &AppServer{xiaohongshuService: service}
++	router := gin.New()
++	router.GET("/api/v1/login/status", server.checkLoginStatusHandler)
++	router.GET("/api/v1/login/qrcode", server.getLoginQrcodeHandler)
++	router.POST("/api/v1/feeds/search", server.searchFeedsHandler)
++	request := func(method, path string) *httptest.ResponseRecorder {
++		recorder := httptest.NewRecorder()
++		input := httptest.NewRequest(method, path, strings.NewReader(`{"keyword":"synthetic","filters":{}}`))
++		input.Header.Set("Content-Type", "application/json")
++		router.ServeHTTP(recorder, input)
++		return recorder
++	}
++	status := request(http.MethodGet, "/api/v1/login/status")
++	require.Equal(t, http.StatusOK, status.Code)
++	var document struct {
++		Data LoginStatusResponse `json:"data"`
++	}
++	require.NoError(t, json.Unmarshal(status.Body.Bytes(), &document))
++	require.False(t, document.Data.IsLoggedIn)
++	search := request(http.MethodPost, "/api/v1/feeds/search")
++	require.Equal(t, http.StatusConflict, search.Code)
++	require.Contains(t, search.Body.String(), `"code":"LOGIN_REQUIRED"`)
++	seq := service.logins.start(func() {})
++	defer service.logins.finish(seq)
++	status = request(http.MethodGet, "/api/v1/login/status")
++	require.Equal(t, http.StatusOK, status.Code)
++	require.NoError(t, json.Unmarshal(status.Body.Bytes(), &document))
++	require.True(t, document.Data.LoginPending)
++	qr := request(http.MethodGet, "/api/v1/login/qrcode")
++	require.Equal(t, http.StatusConflict, qr.Code)
++	require.Contains(t, qr.Body.String(), `"code":"LOGIN_PENDING"`)
++	search = request(http.MethodPost, "/api/v1/feeds/search")
++	require.Equal(t, http.StatusConflict, search.Code)
++	require.Contains(t, search.Body.String(), `"code":"LOGIN_PENDING"`)
++}
+--- a/xiaohongshu/login.go
++++ b/xiaohongshu/login.go
+@@ -6,6 +6,7 @@
+ 	"time"
+ 
+ 	"github.com/go-rod/rod"
++	"github.com/go-rod/rod/lib/proto"
+ 	"github.com/pkg/errors"
+ )
+ 
+@@ -17,23 +18,60 @@
+ 	return &LoginAction{page: page}
+ }
+ 
++const (
++	loginStatusSelector = ".main-container .user .link-wrapper .channel"
++	loginQRSelector     = ".qrcode-img"
++	loginButtonSelector = ".side-bar-component.login-btn, button.login-btn"
++)
++
++// waitLoginState waits until the page exposes either the authenticated marker
++// or a QR image. Navigate only waits for response headers, so a one-shot DOM
++// query can run before this asynchronously rendered page is ready.
++func (a *LoginAction) waitLoginState(ctx context.Context) (bool, error) {
++	pp := a.page.Context(ctx)
++	ticker := time.NewTicker(150 * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		state, err := pp.Eval(`(authenticated, qr) => {
++			const user = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.user;
++			const raw = user && user.userInfo;
++			const info = raw && raw.value !== undefined ? raw.value : raw;
++			const identifier = info && (info.userId || info.user_id);
++			if (document.querySelector(authenticated) ||
++				(info && info.guest === false && typeof identifier === "string" && identifier.trim())) return 1;
++			return document.querySelector(qr) ? -1 : 0;
++		}`, loginStatusSelector, loginQRSelector)
++		if err != nil {
++			if ctx.Err() != nil {
++				return false, ctx.Err()
++			}
++			return false, errors.Wrap(err, "check login page state failed")
++		}
++		switch state.Value.Int() {
++		case 1:
++			return true, nil
++		case -1:
++			return false, nil
++		}
++		select {
++		case <-ctx.Done():
++			return false, ctx.Err()
++		case <-ticker.C:
++		}
++	}
++}
++
  func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 -	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）
 -	pp := a.page.Context(ctx).Timeout(30 * time.Second)
 -	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
-+	pageCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-+	defer cancel()
-+	pp := a.page.Context(pageCtx)
-+	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-+		return false, errors.Wrap(err, "navigate to login status page failed")
-+	}
-+	// DOM readiness is sufficient for the login marker and does not wait for
-+	// every image/analytics resource to finish loading.
-+	if err := pp.Wait(rod.Eval(`() => document.readyState !== "loading"`)); err != nil {
-+		return false, errors.Wrap(err, "wait for login status DOM failed")
-+	}
- 
+-
 -	time.Sleep(1 * time.Second)
 -
- 	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
- 	if err != nil {
- 		return false, errors.Wrap(err, "check login status failed")
- 	}
+-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+-	if err != nil {
+-		return false, errors.Wrap(err, "check login status failed")
+-	}
 -
 -	if !exists {
 -		return false, errors.Wrap(err, "login status element not found")
 -	}
 -
 -	return true, nil
-+	return exists, nil
++	pageCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
++	defer cancel()
++	pp := a.page.Context(pageCtx)
++	if err := pp.SetBlockedURLs([]string{"*.jpg", "*.jpeg", "*.webp", "*.avif", "*.mp4", "*.mp3", "*.woff", "*.woff2"}); err != nil {
++		return false, errors.Wrap(err, "configure login status resources failed")
++	}
++	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
++		return false, errors.Wrap(err, "navigate to login status page failed")
++	}
++	return a.waitLoginState(pageCtx)
  }
  
  // CurrentUser 当前登录用户的基础信息。
-@@ -71,43 +72,67 @@
+@@ -71,43 +109,78 @@
  }
  
  func (a *LoginAction) Login(ctx context.Context) error {
 -	pp := a.page.Context(ctx)
-+	pageCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-+	defer cancel()
-+	pp := a.page.Context(pageCtx)
-+	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-+		return errors.Wrap(err, "navigate to login page failed")
-+	}
-+	if err := pp.Wait(rod.Eval(`() => document.readyState !== "loading"`)); err != nil {
-+		return errors.Wrap(err, "wait for login DOM failed")
-+	}
- 
+-
 -	// 导航到小红书首页，这会触发二维码弹窗
 -	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 -
 -	time.Sleep(2 * time.Second)
 -
 -	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
-+	if exists, _, err := pp.Has(".main-container .user .link-wrapper .channel"); err != nil {
-+		return errors.Wrap(err, "check login status failed")
-+	} else if exists {
- 		return nil
- 	}
+-		return nil
+-	}
 -
 -	pp.MustElement(".main-container .user .link-wrapper .channel")
 -
--	return nil
-+	return errors.New("login status element not found")
++	pageCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	pp := a.page.Context(pageCtx)
++	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
++		return errors.Wrap(err, "navigate to login page failed")
++	}
++	loggedIn, err := a.waitLoginState(pageCtx)
++	if err != nil {
++		return err
++	}
++	if !loggedIn {
++		return errors.New("login QR is visible; scan it before continuing")
++	}
+ 	return nil
  }
  
  func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
@@ -189,56 +673,237 @@
 -
 -	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
 -		return "", true, nil
-+	pageCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-+	defer cancel()
-+	pp := a.page.Context(pageCtx)
-+	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-+		return "", false, errors.Wrap(err, "navigate to login page failed")
- 	}
+-	}
 -
 -	src, err := pp.MustElement(".login-container .qrcode-img").Attribute("src")
 -	if err != nil {
 -		return "", false, errors.Wrap(err, "get qrcode src failed")
-+	if err := pp.Wait(rod.Eval(`() => document.readyState !== "loading"`)); err != nil {
-+		return "", false, errors.Wrap(err, "wait for login DOM failed")
- 	}
+-	}
 -	if src == nil || len(*src) == 0 {
 -		return "", false, errors.New("qrcode src is empty")
 -	}
- 
+-
 -	return *src, false, nil
-+	ticker := time.NewTicker(100 * time.Millisecond)
++	pageCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
++	defer cancel()
++	pp := a.page.Context(pageCtx)
++	if err := pp.SetBlockedURLs([]string{"*.jpg", "*.jpeg", "*.webp", "*.avif", "*.mp4", "*.mp3", "*.woff", "*.woff2"}); err != nil {
++		return "", false, errors.Wrap(err, "configure login page resources failed")
++	}
++	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
++		return "", false, errors.Wrap(err, "navigate to login page failed")
++	}
++	ticker := time.NewTicker(150 * time.Millisecond)
 +	defer ticker.Stop()
++	loginOpened := false
 +	for {
-+		if exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`); err != nil {
-+			if ctx.Err() != nil {
-+				return "", false, ctx.Err()
++		if exists, _, err := pp.Has(loginStatusSelector); err != nil {
++			if pageCtx.Err() != nil {
++				return "", false, pageCtx.Err()
 +			}
 +			return "", false, errors.Wrap(err, "check existing login failed")
 +		} else if exists {
 +			return "", true, nil
 +		}
-+		if exists, element, err := pp.Has(`.login-container .qrcode-img`); err != nil {
-+			if ctx.Err() != nil {
-+				return "", false, ctx.Err()
++		if exists, element, err := pp.Has(loginQRSelector); err != nil {
++			if pageCtx.Err() != nil {
++				return "", false, pageCtx.Err()
 +			}
 +			return "", false, errors.Wrap(err, "find login qrcode failed")
 +		} else if exists && element != nil {
 +			src, err := element.Attribute("src")
++			if err == nil && src != nil && len(*src) > 0 {
++				return *src, false, nil
++			}
++			// The frontend can attach the QR element before it fills its src,
++			// or replace the element while the image is being refreshed.
++		} else if !loginOpened {
++			buttons, err := pp.Elements(loginButtonSelector)
 +			if err != nil {
-+				return "", false, errors.Wrap(err, "get qrcode src failed")
++				return "", false, errors.Wrap(err, "find login button failed")
 +			}
-+			if src == nil || len(*src) == 0 {
-+				return "", false, errors.New("qrcode src is empty")
++			for _, button := range buttons {
++				visible, err := button.Visible()
++				if err != nil || !visible {
++					continue
++				}
++				if err := button.Timeout(3*time.Second).Click(proto.InputMouseButtonLeft, 1); err == nil {
++					loginOpened = true
++				}
++				break
 +			}
-+			return *src, false, nil
 +		}
 +		select {
-+		case <-ctx.Done():
-+			return "", false, ctx.Err()
++		case <-pageCtx.Done():
++			return "", false, pageCtx.Err()
 +		case <-ticker.C:
 +		}
 +	}
  }
  
  func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
+@@ -120,8 +193,8 @@
+ 		case <-ctx.Done():
+ 			return false
+ 		case <-ticker.C:
+-			el, err := pp.Element(".main-container .user .link-wrapper .channel")
+-			if err == nil && el != nil {
++			exists, _, err := pp.Has(loginStatusSelector)
++			if err == nil && exists {
+ 				return true
+ 			}
+ 		}
+--- /dev/null
++++ b/xiaohongshu/login_browser_test.go
+@@ -0,0 +1,151 @@
++package xiaohongshu
++
++import (
++	"context"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/go-rod/rod"
++	"github.com/go-rod/rod/lib/launcher"
++	"github.com/go-rod/rod/lib/proto"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLoginPageStates(t *testing.T) {
++	binary := os.Getenv("XHS_LOGIN_TEST_BROWSER")
++	if binary == "" {
++		t.Skip("set XHS_LOGIN_TEST_BROWSER to run offline browser tests")
++	}
++	control, err := launcher.New().Bin(binary).Headless(true).Launch()
++	require.NoError(t, err)
++	browser := rod.New().ControlURL(control)
++	require.NoError(t, browser.Connect())
++	defer browser.Close()
++	cases := []struct {
++		name     string
++		body     string
++		loggedIn bool
++		wantQR   string
++	}{
++		{
++			name:     "existing login does not click button",
++			body:     `<div class="main-container"><div class="user"><div class="link-wrapper"><span class="channel">synthetic</span></div></div></div><button class="login-btn" onclick="document.body.innerHTML=''">登录</button>`,
++			loggedIn: true,
++		},
++		{
++			name:   "auto opened QR remains unchanged",
++			body:   `<img class="qrcode-img" src="data:image/png;base64,c3ludGhldGlj"><button class="login-btn" onclick="document.body.innerHTML=''">登录</button>`,
++			wantQR: "data:image/png;base64,c3ludGhldGlj",
++		},
++		{
++			name:   "normal visible login button opens QR",
++			body:   `<div class="side-bar-component login-btn" style="display:none">登录</div><button class="login-btn" onclick="this.remove();document.body.insertAdjacentHTML('beforeend','<img class=qrcode-img src=data:image/png;base64,c3ludGhldGlj>')">登录</button>`,
++			wantQR: "data:image/png;base64,c3ludGhldGlj",
++		},
++		{
++			name:   "wait for asynchronously populated QR source",
++			body:   `<img class="qrcode-img"><script>setTimeout(() => document.querySelector('.qrcode-img').src = 'data:image/png;base64,c3ludGhldGlj', 250)</script>`,
++			wantQR: "data:image/png;base64,c3ludGhldGlj",
++		},
++	}
++	for _, item := range cases {
++		t.Run(item.name, func(t *testing.T) {
++			page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
++			require.NoError(t, err)
++			defer page.Close()
++			router := page.HijackRequests()
++			require.NoError(t, router.Add("*", "", func(request *rod.Hijack) {
++				request.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody("<html><body>" + item.body + "</body></html>")
++			}))
++			go router.Run()
++			defer router.Stop()
++			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			image, loggedIn, err := NewLogin(page).FetchQrcodeImage(ctx)
++			require.NoError(t, err)
++			require.Equal(t, item.loggedIn, loggedIn)
++			require.Equal(t, item.wantQR, image)
++		})
++	}
++}
++
++func TestLoginStatusPageStates(t *testing.T) {
++	binary := os.Getenv("XHS_LOGIN_TEST_BROWSER")
++	if binary == "" {
++		t.Skip("set XHS_LOGIN_TEST_BROWSER to run offline browser tests")
++	}
++	control, err := launcher.New().Bin(binary).Headless(true).Launch()
++	require.NoError(t, err)
++	browser := rod.New().ControlURL(control)
++	require.NoError(t, browser.Connect())
++	defer browser.Close()
++	cases := []struct {
++		name     string
++		body     string
++		loggedIn bool
++	}{
++		{
++			name:     "authenticated DOM marker",
++			body:     `<div class="main-container"><div class="user"><div class="link-wrapper"><span class="channel">synthetic</span></div></div></div>`,
++			loggedIn: true,
++		},
++		{
++			name:     "authenticated state without sidebar",
++			body:     `<script>window.__INITIAL_STATE__={user:{userInfo:{guest:false,userId:"synthetic-user"}}}</script>`,
++			loggedIn: true,
++		},
++		{
++			name:     "authenticated reactive state",
++			body:     `<script>window.__INITIAL_STATE__={user:{userInfo:{value:{guest:false,user_id:"synthetic-user"}}}}</script>`,
++			loggedIn: true,
++		},
++		{
++			name: "guest identifier is not authentication",
++			body: `<img class="qrcode-img"><script>window.__INITIAL_STATE__={user:{userInfo:{guest:true,userId:"synthetic-guest"}}}</script>`,
++		},
++		{
++			name: "missing identifier is not authentication",
++			body: `<img class="qrcode-img"><script>window.__INITIAL_STATE__={user:{userInfo:{guest:false}}}</script>`,
++		},
++		{
++			name:     "asynchronous authenticated state",
++			body:     `<script>setTimeout(()=>window.__INITIAL_STATE__={user:{userInfo:{guest:false,userId:"synthetic-user"}}},350)</script>`,
++			loggedIn: true,
++		},
++	}
++	for _, item := range cases {
++		t.Run(item.name, func(t *testing.T) {
++			page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
++			require.NoError(t, err)
++			defer page.Close()
++			router := page.HijackRequests()
++			require.NoError(t, router.Add("*", "", func(request *rod.Hijack) {
++				request.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody("<html><body>" + item.body + "</body></html>")
++			}))
++			go router.Run()
++			defer router.Stop()
++			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++			defer cancel()
++			loggedIn, err := NewLogin(page).CheckLoginStatus(ctx)
++			require.NoError(t, err)
++			require.Equal(t, item.loggedIn, loggedIn)
++		})
++	}
++	t.Run("unresolved state remains an error not logged out", func(t *testing.T) {
++		page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
++		require.NoError(t, err)
++		defer page.Close()
++		router := page.HijackRequests()
++		require.NoError(t, router.Add("*", "", func(request *rod.Hijack) {
++			request.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody("<html><body>loading</body></html>")
++		}))
++		go router.Run()
++		defer router.Stop()
++		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++		defer cancel()
++		loggedIn, err := NewLogin(page).CheckLoginStatus(ctx)
++		require.ErrorIs(t, err, context.DeadlineExceeded)
++		require.False(t, loggedIn)
++	})
++}

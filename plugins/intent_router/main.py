@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import time
 from typing import Any
@@ -15,6 +16,8 @@ from .core import PlannerConfig, PlannerError, RoutePlan, build_planner_prompt, 
 _PLAN_EXTRA = "intent_router_plan"
 _ROUTE_EXTRA = "intent_router_route"
 _ALLOWED_MODES = {"regex", "light"}
+_ATTEMPT_EXTRA = "intent_router_attempted"
+_MAX_PENDING = 2
 
 # This text is deliberately static. The planner can select a capability, but it
 # cannot invent a plugin name, URL, file path, sender, or permission.
@@ -25,6 +28,10 @@ _ROUTE_HINTS = {
     "codex": "当前消息可能需要复杂任务分派；仅使用现有 Codex 分派能力，默认只读，继续执行会话、发送者和外部上下文校验。",
     "web_search": "当前消息可能需要网页搜索；仅使用已配置的搜索能力，先确认查询范围和安全边界。",
     "xhs_search": "当前消息可能要求搜索小红书；仅使用已配置的只读小红书搜索能力，遵守会话白名单，不执行发布、评论、点赞或收藏。",
+    "xhs_status": "用户要检查小红书真实登录态。使用 xhs_login_status；不要调用 Codex、索要截图或建议开启 Computer Use。",
+    "xhs_login": "用户要小红书扫码登录。由已授权私聊的小红书插件提供二维码，不接收 Token 或 Cookie。",
+    "travel_search": "用户要查询/筛选高铁或机票，使用 travel_search_tickets 或 travel_filter_tickets；先澄清缺失日期和起终点，保留真实价格/余票来源，不用Codex、不下单。",
+    "map_route": "用户要地点/地图导航，使用 travel_map 返回官方地图入口；当前不是实时路况API，不能编造距离、耗时或定位，不用Codex。",
 }
 
 
@@ -61,7 +68,7 @@ def _has_external_context(event: AstrMessageEvent) -> bool:
     name="intent_router",
     author="local",
     desc="两档自然语言路由：现有正则或可配置的 light 模型",
-    version="0.1.0",
+    version="0.1.2",
 )
 class Main(star.Star):
     """An optional, side-effect-free planner in front of existing plugins.
@@ -75,6 +82,8 @@ class Main(star.Star):
     def __init__(self, context: star.Context, config: dict[str, Any] | None = None):
         super().__init__(context)
         self.context = context
+        self._pending: set[asyncio.Task] = set()
+        self._closing = False
         cfg = dict(config or {})
         mode = str(cfg.get("mode") or "regex").strip().lower()
         self.mode = mode if mode in _ALLOWED_MODES else "regex"
@@ -87,7 +96,7 @@ class Main(star.Star):
             "mode": self.mode,
             "provider_id": str(cfg.get("provider_id") or "planner-minimax-light"),
             "model": str(cfg.get("model") or "MiniMax-M3.1-Flash"),
-            "timeout": cfg.get("timeout_seconds", cfg.get("timeout", 3.0)),
+            "timeout": cfg.get("timeout_seconds", cfg.get("timeout", 2.0)),
             "min_confidence": cfg.get("min_confidence", 0.85),
             "max_input_chars": cfg.get("max_input_chars", 6000),
         }
@@ -129,36 +138,70 @@ class Main(star.Star):
             return await value if inspect.isawaitable(value) else value
         return None
 
+    async def _request_plan(self, prompt: str):
+        provider = await self._resolve_provider()
+        if provider is None or not hasattr(provider, "text_chat"):
+            raise PlannerError("planner provider is unavailable", code="provider_unavailable", retryable=True)
+        return await provider.text_chat(prompt=prompt, model=self.planner_config.model, request_max_retries=1)
+
+    def _request_finished(self, task: asyncio.Task):
+        self._pending.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    def _record_timeout(self, event: AstrMessageEvent, binding: dict, started: float):
+        event.set_extra("intent_router_timeout", binding)
+        self._log_failure("timeout", started)
+
     async def _classify(self, event: AstrMessageEvent) -> RoutePlan | None:
         if self.mode != "light" or not self._allowed(event) or not self._is_addressed(event):
             return None
         if event.get_extra(_PLAN_EXTRA) is not None:
             return event.get_extra(_PLAN_EXTRA)
+        if event.get_extra(_ATTEMPT_EXTRA):
+            return None
         text = _plain_text(event)
+        owner = hashlib.sha256((str(event.unified_msg_origin) + "\0" + str(event.get_sender_id() or "")).encode()).hexdigest()
+        if event.get_extra("long_term_memory_request") == {"event": id(event), "owner": owner, "text": hashlib.sha256(text.encode()).hexdigest()}:
+            return None
         if text.startswith("/"):
             return None
         if not text:
             if not _has_external_context(event):
                 return None
             text = "[当前消息没有文字，但包含需要理解的附件或图片]"
+        event.set_extra(_ATTEMPT_EXTRA, True)
+        binding = {"event": id(event),
+                   "owner": hashlib.sha256((str(event.unified_msg_origin) + "\0" + str(event.get_sender_id() or "")).encode()).hexdigest(),
+                   "text": hashlib.sha256(_plain_text(event).encode()).hexdigest()}
+        started = time.monotonic()
+        task = None
         try:
+            if self._closing or len(self._pending) >= _MAX_PENDING:
+                self._log_failure("busy", started)
+                return None
             if len(text) > self.planner_config.max_input_chars:
                 text = text[: self.planner_config.max_input_chars]
             prompt = build_planner_prompt(text, _context_hints(event))
-            provider = await self._resolve_provider()
-            if provider is None or not hasattr(provider, "text_chat"):
-                raise PlannerError("planner provider is unavailable", code="provider_unavailable", retryable=True)
-            started = time.monotonic()
-            response = await asyncio.wait_for(
-                provider.text_chat(
-                    prompt=prompt,
-                    model=self.planner_config.model,
-                    request_max_retries=1,
-                ),
-                timeout=float(self.planner_config.timeout),
-            )
+            budget = float(self.planner_config.timeout)
+            task = asyncio.create_task(self._request_plan(prompt))
+            self._pending.add(task)
+            task.add_done_callback(self._request_finished)
+            completed, _ = await asyncio.wait({task}, timeout=max(0, budget - (time.monotonic() - started)))
+            if not completed or time.monotonic() - started >= budget:
+                task.cancel()
+                self._record_timeout(event, binding, started)
+                return None
+            if task.cancelled():
+                return None
+            response = task.result()
             raw = getattr(response, "completion_text", "")
-            plan = extract_plan(raw, timeout=float(self.planner_config.timeout))
+            plan = extract_plan(raw, timeout=max(0.001, budget - (time.monotonic() - started)))
+            if time.monotonic() - started >= budget:
+                self._record_timeout(event, binding, started)
+                return None
+            if plan.route == "codex":
+                plan = RoutePlan(plan.route, plan.confidence, text, plan.mode, plan.missing_context)
             elapsed_ms = int((time.monotonic() - started) * 1000)
             event.set_extra(_PLAN_EXTRA, plan.to_mapping())
             event.set_extra(_ROUTE_EXTRA, plan.route)
@@ -175,17 +218,25 @@ class Main(star.Star):
                     plan.confidence >= self.planner_config.min_confidence,
                 )
             return plan
+        except asyncio.CancelledError:
+            if task is not None:
+                task.cancel()
+            raise
         except asyncio.TimeoutError:
-            self._log_failure("timeout")
+            self._record_timeout(event, binding, started)
         except PlannerError as error:
-            self._log_failure(error.code)
+            if error.code == "timeout":
+                self._record_timeout(event, binding, started)
+            else:
+                self._log_failure(error.code, started)
         except Exception as error:  # provider failures must fall back silently
             self.logger.warning("intent_router planner failure type=%s", type(error).__name__)
         return None
 
-    def _log_failure(self, code: str) -> None:
+    def _log_failure(self, code: str, started: float | None = None) -> None:
         if self.log_route_details:
-            self.logger.info("intent_router mode=light result=fallback code=%s", str(code)[:48])
+            elapsed_ms = max(0, int((time.monotonic() - started) * 1000)) if started is not None else 0
+            self.logger.info("intent_router mode=light result=fallback code=%s latency_ms=%d", str(code)[:48], elapsed_ms)
 
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE
@@ -220,4 +271,9 @@ class Main(star.Star):
         event.set_extra("intent_router_hint_injected", True)
 
     async def terminate(self):
-        return None
+        self._closing = True
+        tasks = set(self._pending)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=0.1)

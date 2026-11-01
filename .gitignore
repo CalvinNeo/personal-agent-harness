@@ -11,6 +11,8 @@ id_rsa*
 id_ed25519*
 auth.json
 credentials.json
+cookies.json
+session.json
 cmd_config.json
 *_config.json
 admin-initial-password
@@ -31,12 +33,15 @@ reminders.json
 *.db-*
 *.sqlite*
 *.log
+*.har
 *.jsonl
 *.bak*
 *.backup*
 *.tar*
 *.zip
 *.whl
+*.tgz
+*.bin
 
 # Development products.
 .venv/

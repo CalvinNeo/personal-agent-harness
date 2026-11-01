@@ -34,7 +34,9 @@ def build_config(password: str, api_base: str, model: str, search: bool) -> dict
             "id_whitelist": ["__deny_all_until_configured__"], "id_whitelist_log": True,
             "wl_ignore_admin_on_group": False, "wl_ignore_admin_on_friend": False,
             "no_permission_reply": False, "ignore_bot_self_message": True,
-            "ignore_at_all": True, "empty_mention_waiting_need_reply": False,
+            "ignore_at_all": True, "empty_mention_waiting": True,
+            "empty_mention_waiting_need_reply": False, "friend_message_needs_wake_prefix": False,
+            "reply_with_mention": False, "reply_with_quote": False,
             "rate_limit": {"time": 60, "count": 10, "strategy": "discard"},
         },
         "provider_sources": [{"id": "custom_model", "provider": "openai",
@@ -46,6 +48,10 @@ def build_config(password: str, api_base: str, model: str, search: bool) -> dict
         "provider_settings": {
             "enable": False, "computer_use_runtime": "none", "computer_use_require_admin": True,
             "web_search": search, "web_search_link": search, "websearch_provider": "anysearch",
+            "streaming_response": False, "display_reasoning_text": False,
+            "show_tool_use_status": False, "show_tool_call_result": False,
+            "buffer_intermediate_messages": False, "datetime_system_prompt": True,
+            "max_quoted_fallback_images": 20, "image_compress_options": {"max_size": 1280},
             "proactive_capability": {"add_cron_tools": False},
         },
         "admins_id": [], "disable_builtin_commands": True, "disable_metrics": True,
@@ -59,8 +65,8 @@ def main():
     parser.add_argument("--etc-dir", type=Path, default=Path("/etc/astrbot"))
     parser.add_argument("--service-user", default="astrbot")
     parser.add_argument("--api-base", default="https://api.example.com/v1")
-    parser.add_argument("--model", default="REPLACE_WITH_MODEL_NAME")
-    parser.add_argument("--enable-search", action="store_true")
+    parser.add_argument("--model", default="gpt-6-astra")
+    parser.add_argument("--enable-search", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     url = urlsplit(args.api_base)
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:

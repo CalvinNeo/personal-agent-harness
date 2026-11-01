@@ -1,0 +1,16 @@
+{
+  "id": "custom_model",
+  "provider": "openai",
+  "type": "openai_chat_completion",
+  "provider_type": "chat_completion",
+  "enable": false,
+  "key": ["$MODEL_API_KEY"],
+  "api_base": "https://api.example.com/v1",
+  "timeout": 120,
+  "proxy": "",
+  "custom_headers": {},
+  "providers": [
+    {"id": "custom_chat", "model": "gpt-6-astra", "enable": false, "modalities": ["text", "image", "tool_use"]},
+    {"id": "custom_chat_text", "model": "gpt-6-astra", "enable": false, "modalities": ["text"]}
+  ]
+}

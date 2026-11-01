@@ -1,27 +1,13 @@
-# Long-term memory
+# long_term_memory
 
-Persistent, explicitly requested preferences and facts for a QQ user in one allowed conversation. Ordinary chat is not saved automatically. Only top-level `Plain` text can authorize a memory operation; forwarded/quoted message chains are not traversed.
+只在允许的 QQ 群／私聊和发送者范围内工作。普通聊天不自动保存；明确说“记住/记录/加入长期记忆”“修改/更新”“忘记/删除”“查看我的长期记忆”时才操作。记忆按完整 QQ 会话和发送者隔离，存储在权限为 0600 的 SQLite 文件中，不是 `long_term_memory.md` 或其他工作区 Markdown 文件。
 
-Examples:
+支持“办公地点是合成园区。以上要加入长期记忆”这样的尾句授权，仅保存本条直接文字，不读取引用／历史补写。群聊和授权私聊均在前置规划之前处理；报告摘要请求先预留本地入口，再由真实附件提取工具完成。记忆入口优先于前置超时和 Codex 续接，不能靠给 Codex 放开写权限代替数据库持久化。只有 SQLite 返回成功才确认保存。
 
-- `记住我喜欢喝茶`
-- `以后回答简洁一点，请记住`
-- `把关于饮料的记忆改成我喜欢咖啡`
-- `忘记我喜欢喝茶这条记忆`
-- `查看我的长期记忆`
-- `/记忆 list 2`
-- `清空我的长期记忆`
+“将当前日期和该报告单记入长期记忆，备查”需要本次已加载的报告图片或直接引用的真实报告文字。
+模型仅提取可辨认的报告项目、数值、单位和报告日期，服务端补充北京时间的记录日期。
+不保存姓名、身份证、联系方式或二维码；看不清时澄清，不猜测。只有工具返回成功才确认写入。
 
-Clear is immediately authorized by an explicit clear request. Negation, quoted commands, capability questions and examples do not authorize mutations. The model tool is bound to the exact action and text parsed from the current request. Ambiguous update/delete targets require a more specific target; `#ID` from the list is also supported.
-
-Each scope is SHA-256 of the exact conversation and sender identifiers. All database queries are scoped to that value. Listing is paginated so old records remain accessible. Passwords, keys, tokens, private keys and common credential formats are rejected before storage. The plugin logs only operation, hashed scope and count. Runtime SQLite files must remain outside Git.
-
-`Main.memory_context_for_task(event, prompt="") -> str` performs synchronous read-only retrieval for normal chat or a delegated Codex task. It verifies the same QQ allowlist, sender and addressed-message conditions, searches at most 100 scoped entries using Chinese bigrams and word overlap, includes general response preferences, and returns up to 8 entries within a 6,000-character bound as labeled JSON background data. It does not grant permissions or execute stored text. No relevant records returns an empty string.
-
-Limitations: deterministic explicit phrasing is supported; arbitrary paraphrases may need a clearer request. Keyword retrieval is not embedding-based and may miss synonyms. Secret filtering is defense in depth, not a complete secret detector. Deleting memory does not erase prior normal chat history or external backups.
-
-Tests use fake events, fake transport and a temporary SQLite database, without QQ or model calls:
-
-```sh
-python3 plugins/long_term_memory/test_memory.py
-```
+上下文授权绑定当前事件、发送者和当前原文；占位图片、空摘要、否定句、示例或他人转述不能授权写入。
+普通文字记忆仍要求工具内容与用户原文一致，不允许任意扩写。
+“记住……分别创建提醒”交给提醒工具处理，不保存成长期偏好；缺少具体时间时必须澄清。

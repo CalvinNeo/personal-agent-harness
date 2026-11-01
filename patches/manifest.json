@@ -2,6 +2,16 @@
   "astrbot_version": "4.29.3",
   "files": [
     {
+      "path": "astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py",
+      "original_sha256": "b2b839d8dfd27da8e9011d97bc91d4777c44f3d8d0d4dc96f4ebbcc62c62d6d4",
+      "patched_sha256": "d312516df1f042ac27a86ac8a11737a4d1dafd3abd69b41380c4d9c173deeea0"
+    },
+    {
+      "path": "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py",
+      "original_sha256": "f9e9a727d645cfd53d33bd1804f43d46a8413b4ca925dcff3e024a6c0259c8f0",
+      "patched_sha256": "3c6d62ca2d58ab47b9250655c24a21cd0c832a754dc18d033332a4be5ce7fa05"
+    },
+    {
       "path": "astrbot/core/provider/sources/openai_source.py",
       "original_sha256": "73c4f3675d5cbb1d448a13c8b43a12fe251aafdd60858066d32bae563a2d96f1",
       "patched_sha256": "b9d4fd4aab4c600c5664e61d862f4e4782bb0f77807670c346a808d40cb73c79"
@@ -12,14 +22,14 @@
       "patched_sha256": "dce55fe115f6071a94e5ef057578c8f1e929f5efc0b14c0d0dbb02a520073b10"
     },
     {
-      "path": "astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py",
-      "original_sha256": "b2b839d8dfd27da8e9011d97bc91d4777c44f3d8d0d4dc96f4ebbcc62c62d6d4",
-      "patched_sha256": "2c56435a9c9a33490df36e0eb37020df70c913caca82669a5d1f7bd8b5f960a6"
+      "path": "astrbot/core/utils/media_utils.py",
+      "original_sha256": "e75016dfea6312c2e8717256e3befcadf45790e251525330dbf7868cd236a42c",
+      "patched_sha256": "77c8479d1d54021a66f9d27e037242a8be2d007165cc0c996edfea770a49fd1d"
     },
     {
-      "path": "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py",
-      "original_sha256": "f9e9a727d645cfd53d33bd1804f43d46a8413b4ca925dcff3e024a6c0259c8f0",
-      "patched_sha256": "3c6d62ca2d58ab47b9250655c24a21cd0c832a754dc18d033332a4be5ce7fa05"
+      "path": "astrbot/core/utils/public_image_download.py",
+      "original_sha256": null,
+      "patched_sha256": "0dd631a3fa09527ac6012155a4ebf41f304905c8ffbf90bdfb85718e4a2024aa"
     }
   ]
 }

@@ -11,6 +11,7 @@ SupplementaryGroups=xhs-secret
 WorkingDirectory=/var/lib/xhs/data
 Environment=HOME=/var/lib/xhs
 Environment=PATH=/usr/bin:/bin
+Environment=GODEBUG=netdns=go
 UMask=0077
 ExecStart=/usr/local/libexec/xhs-mcp-start
 Restart=on-failure
@@ -32,7 +33,9 @@ RestrictRealtime=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Chromium may use netlink during sandboxed browser startup. Keep all other
+# address-family restrictions; the HTTP API remains bound to loopback.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadOnlyPaths=/opt/xiaohongshu-mcp /etc/xhs/api-token
 ReadWritePaths=/var/lib/xhs
 # Chromium also binds an ephemeral loopback DevTools port. The API address is

@@ -93,6 +93,15 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         self.root_patch.stop()
         self.temp.cleanup()
 
+    async def test_text_only_task_never_asks_image_cache_for_an_attachment(self):
+        selector = AsyncMock(side_effect=ValueError("no recent pictures"))
+        context = types.SimpleNamespace(get_all_stars=lambda: [types.SimpleNamespace(name="image_context", activated=True, star_cls=types.SimpleNamespace(select_for_task=selector))])
+        for text in ("用 codex 看下为什么不可用", "已登录，检查下小红书的登录态", "用 Codex 找一下好玩的南京两人剧本杀"):
+            images, quote = await media.prepare_images(Event(Plain(text)), context)
+            self.assertEqual(images, [])
+            self.assertEqual(quote, "")
+        selector.assert_not_awaited()
+
     async def test_actual_local_image_becomes_bounded_jpeg(self):
         images, quote = await media.prepare_images(Event(Plain("请用 Codex 标注"), Image(str(self.file))), self.context)
         self.assertEqual(quote, "")

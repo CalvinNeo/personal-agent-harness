@@ -24,9 +24,19 @@ _PERIOD = re.compile(r"^(凌晨|早上|早晨|上午|中午|下午|傍晚|晚上
 _CLOCK = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?(?!\d)\s*")
 _CN_CLOCK = re.compile(rf"^(?P<hour>{_NUM})\s*(?:点|时)(?:(?P<half>半)|(?P<minute>{_NUM})\s*分?)?\s*")
 _INTENT = re.compile(r"(?:提醒|通知|叫)(?:一下|下)?我")
-_SETUP = re.compile(r"^(?:设置|设|创建|建立|安排|添加|定)(?:置)?(?:一下|个|一个|一条)?(?:定时)?提醒(?:任务)?\s*[，,:：、]?\s*")
+_SETUP = re.compile(r"^(?:设置|设|创建|建立|安排|添加|定)(?:置)?(?:一下|个|一个|一条|多个|几个|几条|若干条|[一二两三四五六七八九十]+个|[一二两三四五六七八九十]+条)?(?:定时)?提醒(?:任务)?\s*[，,:：、]?\s*")
+# A common Chinese ordering puts the reminder noun at the end of the request,
+# e.g. “帮我设置两分钟后的喝水提醒”.  It is still safe to recognize this as
+# setup only when the following text starts with a complete time expression;
+# ordinary discussion such as “设置提醒的语法” therefore remains untouched.
+_SETUP_BEFORE_TIME = re.compile(
+    r"^(?:设置|设|创建|建立|安排|添加|定)(?:置)?(?:一下|个|一个|一条)?(?:定时)?\s*"
+    r"(?=(?:在|再过|过|今天|今日|明天|明日|后天|凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|今晚|\d|[零〇一二两三四五六七八九十百千万半]))"
+)
 _POLITE = re.compile(r"^(?:请你|请|麻烦你|麻烦|劳烦|帮我|给我|你能不能|能不能|你可以|可以|你能否|能否|能|你|一下)\s*")
-_NEGATIVE = re.compile(r"不要|不用|无需|不必|别(?:再)?(?:帮我|给我|提醒|通知|叫|设置|创建|安排)|取消|撤销|停止|不想|不需要|不希望|不(?:要)?再")
+_NEGATIVE = re.compile(r"不要|不用|无需|不必|取消|撤销|停止|不想|不需要|不希望|不(?:要)?再"
+r"|(?:^|(?<=[，,。；;：:\s]))别(?:再)?(?:帮我|给我|提醒|通知|叫|设置|创建|安排)"
+r"|(?:请|你|我|都|大家|千万|绝对)别(?:再)?(?:帮我|给我|提醒|通知|叫|设置|创建|安排)")
 _DISCUSSION = re.compile(r"怎么|如何|为什么|是什么|什么意思|什么叫|是否支持|支持.{0,8}(?:提醒|定时)|(?:提醒|定时).{0,8}(?:功能|语法|命令|示例|例子)|(?:介绍|解释|讲解|演示).{0,8}(?:提醒|定时)")
 _STATUS_QUESTION = re.compile(r"(?:设置|创建|安排|完成|触发|执行|发送|收到|取消|成功|失败)(?:了|过|好)?(?:吗|么|没|没有|了吗)[？?。]*$|(?:有没有|是否|有无).{0,12}(?:提醒|通知)")
 _REPORTED = re.compile(r"(?:他说|她说|他说过|她说过|有人说|朋友说|小明说|他说的|她说的|原话|转发|引用|转述|例如|比如|假如|如果|假设|测试文本|测试语句)")
@@ -59,7 +69,7 @@ def _number(value: str) -> float:
     return float(total + section + digit)
 
 
-def _time_prefix(text: str, now: datetime) -> tuple[float, str] | None:
+def _time_prefix(text: str, now: datetime, inherit: datetime | None = None) -> tuple[float, str] | None:
     """Consume a time at the start, leaving the intended reminder content."""
     text = re.sub(r"^在\s*", "", text.strip(), count=1)
     match = _RELATIVE.match(text)
@@ -111,7 +121,15 @@ def _time_prefix(text: str, now: datetime) -> tuple[float, str] | None:
             raise ReminderParseError("时间无效，请使用例如“下午三点半”或“15:30”。")
         hour, minute, second = int(hour_value), int(minute_value), 0
         if period is None and hour <= 12:
-            raise ReminderParseError("请说明上午或下午，例如“下午三点提醒我开会”，也可以写“15:00”。")
+            # In a batch, a following clock inherits the date and AM/PM
+            # context from the previous item (e.g. “明天上午九点…，十一点…”
+            # and “明天下午三点…，四点…”).  Without an inherited context the
+            # bare clock remains intentionally ambiguous.
+            if inherit is not None:
+                if inherit.hour >= 12:
+                    hour += 12
+            else:
+                raise ReminderParseError("请说明上午或下午，例如“下午三点提醒我开会”，也可以写“15:00”。")
 
     if period:
         if period in {"凌晨", "早上", "早晨", "上午"}:
@@ -130,6 +148,8 @@ def _time_prefix(text: str, now: datetime) -> tuple[float, str] | None:
             if period in {"晚上", "傍晚"} and hour == 12:
                 raise ReminderParseError("晚上十二点存在日期歧义，请写明日期和“00:00”。")
 
+    if exact_date is None and day_offset is None and inherit is not None:
+        exact_date = inherit
     try:
         due = (exact_date or now + timedelta(days=day_offset or 0)).replace(
             hour=hour, minute=minute, second=second, microsecond=0)
@@ -142,10 +162,17 @@ def _time_prefix(text: str, now: datetime) -> tuple[float, str] | None:
 
 def _content(value: str) -> str:
     value = value.strip(_TRIM)
+    # The suffix form “两分钟后的喝水提醒” leaves a grammatical 的 after the
+    # time prefix has been consumed.  It is a connector, never task content.
+    value = re.sub(r"^的+", "", value).strip(_TRIM)
     value = re.sub(r"^(?:提醒|通知|叫)(?:一下|下)?我\s*", "", value)
     value = re.sub(r"^(?:提醒|通知)\s*", "", value)
     value = value.strip(_TRIM)
     value = re.sub(r"(?:可以吗|好吗|行吗|好不好)[？?]?\s*$", "", value).strip(_TRIM)
+    # “喝水提醒/喝水通知” is the suffix form of a task request.  Strip only
+    # the final noun and then run the same empty-content guard below; this does
+    # not change ordinary content that mentions a reminder in the middle.
+    value = re.sub(r"(?:的)?(?:提醒|通知)(?:事项|任务)?\s*$", "", value).strip(_TRIM)
     if not value or value in {"一下", "下", "我", "吗", "嘛"}:
         raise ReminderParseError("请告诉我要提醒什么，例如“两分钟后提醒我喝水”。")
     return value
@@ -171,7 +198,8 @@ def parse_due(text: str, now: datetime) -> tuple[float, str] | None:
         return None
 
 
-def parse_natural(text: str, now: datetime) -> tuple[float, str] | None:
+def _parse_natural_single(text: str, now: datetime, *, inherit: datetime | None = None,
+                          allow_multi_guard: bool = True) -> tuple[float, str] | None:
     """Return None for conversation, a reminder tuple, or a helpful parse error.
 
     Recognition requires an explicit self-reminder request or a setup phrase.
@@ -200,6 +228,8 @@ def parse_natural(text: str, now: datetime) -> tuple[float, str] | None:
     if modal_question and _INTENT.fullmatch(text.strip(_TRIM)):
         return None
     setup = _SETUP.match(text)
+    if setup is None:
+        setup = _SETUP_BEFORE_TIME.match(text)
     intent = _INTENT.search(text)
     if setup is None and intent is None:
         # Clearly asks the bot to remind another person: explain the restriction.
@@ -212,18 +242,18 @@ def parse_natural(text: str, now: datetime) -> tuple[float, str] | None:
         return None
     if _RECURRENCE.search(text):
         raise ReminderParseError("目前只支持一次性提醒，暂不支持每天、每周或循环提醒；请提供一次具体时间。")
-    if len(list(_INTENT.finditer(text))) > 1 or re.search(r"[，,；;](?:然后|再|和)?\s*(?:明天|后天|今天|下午|上午|晚上|\d{1,2}:|(?:\d+|[一二两三四五六七八九十半]+)(?:分钟|小时|秒)后)", text) and not setup:
+    if allow_multi_guard and (len(list(_INTENT.finditer(text))) > 1 or re.search(r"[，,；;](?:然后|再|和)?\s*(?:明天|后天|今天|下午|上午|晚上|\d{1,2}:|(?:\d+|[一二两三四五六七八九十半]+)(?:分钟|小时|秒)后)", text) and not setup):
         raise ReminderParseError("请一次创建一条提醒；多个提醒请分开发送。")
 
     if setup:
-        body = text[setup.end():]
+        body = text[setup.end():].lstrip(_TRIM)
     elif intent and intent.start() == 0:
         body = text[intent.end():].lstrip(_TRIM)
     else:
         # A time must start the request, preventing conversation such as
         # “我记得你两分钟后提醒我喝水” from becoming an instruction.
         body = text
-    result = _time_prefix(body, now)
+    result = _time_prefix(body, now, inherit=inherit)
     if result is None:
         if setup or (intent and intent.start() == 0) or re.match(r"^(?:在|过|再过|今天|明天|后天|上午|下午|晚上|凌晨|早上|明早|今晚|\d|[一二两三四五六七八九十半])", body):
             raise ReminderParseError("请写明提醒时间，例如“两分钟后提醒我喝水”或“明天上午九点提醒我开会”。")
@@ -235,3 +265,120 @@ def parse_natural(text: str, now: datetime) -> tuple[float, str] | None:
         if not _INTENT.match(remaining.strip(_TRIM)):
             return None
     return due, _content(remaining)
+
+
+def _split_batch(text: str) -> list[str]:
+    """Split a natural request into reminder clauses.
+
+    Punctuation is intentionally the primary separator.  We only split a
+    conjunction when it is followed by a recognizable time prefix, avoiding
+    accidental splits inside reminder text.  A setup lead-in such as
+    “帮我设置一个提醒，” is retained and merged into the first timed clause.
+    """
+    # Newline-separated lists are common in QQ.  Conjunctions are split
+    # repeatedly, but only when the right side begins a recognizable time or
+    # self-reminder clause; ordinary prose such as “开会，然后带资料” stays
+    # part of the reminder text.  “再过三分钟” is a time prefix, so “再” is
+    # excluded from the connector alternative in that form.
+    time_start = r"(?:在|再过|过|今天|明天|后天|凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|今晚|\d|[零〇一二两三四五六七八九十百千万半])"
+    clause_start = rf"(?:{time_start}|(?:提醒|通知|叫)(?:一下|下)?我)"
+    connector = r"(?:然后|以及|并且|另外|同时|接着|再(?!\s*过))"
+    lead = r"(?:然后|以及|并且|另外|同时|接着|再(?!\s*过)|记得|还要)"
+    pieces = [part.strip(_TRIM + " ") for part in re.split(r"[，,；;]\s*|\n+|(?<=提醒)[：:]", text) if part.strip(_TRIM + " ")]
+    if len(pieces) <= 1:
+        pieces = [part.strip(_TRIM + " ") for part in re.split(
+            rf"{connector}\s*(?=(?:{lead}\s*)?{clause_start})", text)
+            if part.strip(_TRIM + " ")]
+    # A setup preamble may be separated from the first timed clause:
+    # “帮我设置两个提醒：明天九点开会，十一点吃饭”.  Attach it to the
+    # first clause so the normal setup parser can consume it.
+    setup_prefix_attached = False
+    if len(pieces) > 1 and re.search(r"(?:设置|设|创建|建立|安排|添加|定).{0,12}(?:提醒|通知|闹钟)", pieces[0]) and not re.match(
+        r"^(?:在|再过|过|今天|明天|后天|凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|今晚|\d|[零〇一二两三四五六七八九十百千万半])", pieces[0]
+    ):
+        prefix = pieces.pop(0)
+        pieces[0] = prefix + "，" + pieces[0]
+        setup_prefix_attached = True
+    if len(pieces) <= 1:
+        return pieces
+
+    # The setup preamble is not a reminder item. Merge it with the first
+    # timed clause so existing “帮我设置一个提醒，两分钟后喝水” remains valid.
+    while len(pieces) > 1 and not re.search(r"(?:提醒|通知|叫|设置|创建|安排|添加|定)", pieces[0]):
+        pieces[1] = pieces[0] + "，" + pieces[1]
+        pieces.pop(0)
+    if len(pieces) > 1 and not setup_prefix_attached and not re.match(r"^(?:提醒|通知|叫)我", pieces[0]) and not re.match(r"^(?:在|再过|过|今天|明天|后天|凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|今晚|\d|[零〇一二两三四五六七八九十百千万半])", pieces[0]):
+        pieces[1] = pieces[0] + "，" + pieces[1]
+        pieces.pop(0)
+    # A comma inside ordinary reminder content is not a batch separator.
+    if len(pieces) > 1:
+        if not any(re.match(rf"^(?:{lead}\s*)?{clause_start}", part)
+                   for part in pieces[1:]):
+            return [text]
+    return pieces
+
+
+def parse_natural_many(text: str, now: datetime) -> list[tuple[float, str]] | None:
+    """Parse one or more one-shot natural-language reminders atomically.
+
+    A list is returned for a concrete request; ``None`` means ordinary
+    conversation.  Parse errors are raised before any persistence occurs.
+    Following clauses may inherit the preceding clause's date and AM/PM
+    context, which supports “明天下午三点…，四点…”。
+    """
+    text = text.strip()
+    pieces = _split_batch(text)
+    if len(pieces) <= 1:
+        result = _parse_natural_single(text, now)
+        return None if result is None else [result]
+    results: list[tuple[float, str]] = []
+    previous_due: datetime | None = None
+    first = True
+    for piece in pieces:
+        clause = piece.strip(_TRIM + " ")
+        clause = re.sub(r"^(?:然后|以及|并且|另外|同时|接着|再(?!\s*过)|记得|还要)\s*", "", clause)
+        # A later clause may omit “提醒我” after the first explicit item.
+        if not first and re.match(r"^(?:在|再过|过|今天|明天|后天|凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|今晚|\d|[零〇一二两三四五六七八九十百千万半])", clause):
+            clause = "提醒我" + clause
+        result = _parse_natural_single(clause, now, inherit=previous_due, allow_multi_guard=False)
+        if result is None:
+            return None
+        results.append(result)
+        previous_due = datetime.fromtimestamp(result[0], now.tzinfo)
+        first = False
+    return results
+
+
+def parse_natural(text: str, now: datetime) -> tuple[float, str] | None:
+    """Parse one natural-language reminder; use :func:`parse_natural_many`
+    for a batch request."""
+    result = _parse_natural_single(text, now)
+    return result
+
+
+def parse_due_many(text: str, now: datetime) -> list[tuple[float, str]] | None:
+    """Parse command-style or natural requests containing multiple clauses."""
+    natural = parse_natural_many(text, now)
+    if natural is not None:
+        return natural
+    pieces = [part.strip(_TRIM + " ") for part in re.split(r"[，,；;]|\n+|(?<=提醒)[：:]", text) if part.strip(_TRIM + " ")]
+    if len(pieces) <= 1:
+        one = parse_due(text, now)
+        return None if one is None else [one]
+    results: list[tuple[float, str]] = []
+    previous_due: datetime | None = None
+    for piece in pieces:
+        try:
+            piece = re.sub(r"^(?:然后|以及|并且|另外|同时|接着|再(?!\s*过)|记得|还要)\s*", "", piece)
+            # Command-style batches may repeat the explicit self-reminder phrase.
+            piece = re.sub(r"^(?:提醒|通知|叫)(?:一下|下)?我\s*", "", piece)
+            result = _time_prefix(piece, now, inherit=previous_due)
+            if result is None:
+                return None
+            due, content = result
+            result = (due, _content(content))
+        except (ReminderParseError, OverflowError, ValueError):
+            return None
+        results.append(result)
+        previous_due = datetime.fromtimestamp(result[0], now.tzinfo)
+    return results

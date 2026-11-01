@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+[ -r /etc/xhs/api-token ]
 AUTH_TOKEN=$(cat /etc/xhs/api-token)
 [ -n "$AUTH_TOKEN" ]
 export AUTH_TOKEN

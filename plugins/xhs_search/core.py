@@ -1,8 +1,4 @@
-"""Credential-safe client for four xiaohongshu-mcp REST operations.
-
-Only search and the operator's login lifecycle are exposed. Credentials are
-read from a protected local file and are never accepted from QQ messages.
-"""
+"""Credential-safe read-only notes and operator login client."""
 from __future__ import annotations
 
 import base64
@@ -30,6 +26,7 @@ MAX_RESULTS = 20
 _TOKEN_RE = re.compile(r"^[\x21-\x7e]+$")
 _OPERATIONS = {
     ("POST", "/api/v1/feeds/search"),
+    ("POST", "/api/v1/feeds/detail"),
     ("GET", "/api/v1/login/status"),
     ("GET", "/api/v1/login/qrcode"),
     ("DELETE", "/api/v1/login/cookies"),
@@ -176,10 +173,16 @@ class XHSClient:
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if (method, path) not in _OPERATIONS:
             raise XHSError("小红书请求操作无效。", code="request_invalid")
-        if (method != "POST" and payload is not None) or (method == "POST" and (
-                not isinstance(payload, dict) or set(payload) != {"keyword", "filters"}
-                or not isinstance(payload["keyword"], str) or not payload["keyword"].strip()
-                or len(payload["keyword"]) > MAX_QUERY_LENGTH or payload["filters"] != {})):
+        valid_search = path == "/api/v1/feeds/search" and (
+                isinstance(payload, dict) and set(payload) == {"keyword", "filters"}
+                and isinstance(payload["keyword"], str) and payload["keyword"].strip()
+                and len(payload["keyword"]) <= MAX_QUERY_LENGTH and payload["filters"] == {})
+        valid_detail = path == "/api/v1/feeds/detail" and (
+                isinstance(payload, dict) and set(payload) == {"feed_id", "xsec_token", "load_all_comments"}
+                and isinstance(payload["feed_id"], str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", payload["feed_id"])
+                and isinstance(payload["xsec_token"], str) and re.fullmatch(r"[A-Za-z0-9+/_=-]{1,2048}", payload["xsec_token"])
+                and payload["load_all_comments"] is False)
+        if (method != "POST" and payload is not None) or (method == "POST" and not (valid_search or valid_detail)):
             raise XHSError("小红书请求参数无效。", code="request_invalid")
         token = _read_token(self.token_file)
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -198,6 +201,17 @@ class XHSClient:
                 raise XHSError("小红书服务鉴权失败。", code="unauthorized") from None
             if status in (404, 405):
                 raise XHSError("小红书服务接口版本不兼容。", code="endpoint_invalid") from None
+            try:
+                error_data = json.loads(error.read(4097))
+                error_code = error_data.get("code") if isinstance(error_data, dict) else None
+            except (ValueError, OSError, TypeError):
+                error_code = None
+            if error_code == "LOGIN_REQUIRED":
+                raise XHSError("小红书尚未登录。", code="login_required") from None
+            if error_code == "LOGIN_PENDING":
+                raise XHSError("小红书正在等待扫码确认。", code="login_pending") from None
+            if path == "/api/v1/login/status":
+                raise XHSError("小红书登录状态检查暂未成功。", code="status_unavailable") from None
             raise XHSError("小红书服务暂时不可用。") from None
         except Exception:
             # HTTP exceptions can contain headers, URLs and response bodies.
@@ -233,12 +247,30 @@ class XHSClient:
         data = self._request("POST", "/api/v1/feeds/search", {"keyword": query.strip(), "filters": {}})
         return normalize_results(data, limit)
 
+    def search_bundle(self, query: str, *, limit: int = 5) -> dict:
+        if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_LENGTH:
+            raise XHSError("请提供有效的搜索关键词。", code="invalid_query")
+        from .notes import search_references
+        data = self._request("POST", "/api/v1/feeds/search", {"keyword": query.strip(), "filters": {}})
+        results = normalize_results(data, limit)
+        return {"results": results, "references": search_references(data, normalize_results(data, MAX_RESULTS))}
+
+    def note_detail(self, feed_id: str, xsec_token: str) -> dict:
+        from .notes import normalize_note
+        data = self._request("POST", "/api/v1/feeds/detail", {
+            "feed_id": feed_id, "xsec_token": xsec_token, "load_all_comments": False,
+        })
+        return normalize_note(data, feed_id)
+
     def login_status(self) -> bool:
+        return self.login_details()["is_logged_in"]
+
+    def login_details(self) -> dict[str, bool]:
         data = self._request("GET", "/api/v1/login/status")
         value = data.get("is_logged_in")
         if type(value) is not bool:
             raise XHSError("小红书登录状态响应无效。")
-        return value
+        return {"is_logged_in": value, "login_pending": data.get("login_pending") is True}
 
     def login_qr(self) -> bytes:
         data = self._request("GET", "/api/v1/login/qrcode")

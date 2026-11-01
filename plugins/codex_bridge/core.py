@@ -58,6 +58,44 @@ def quoted_job_id(text: str) -> str | None:
     return next(iter(matches)).lower() if len(matches) == 1 else None
 
 
+def quoted_task_references(text: str) -> set[str]:
+    """Extract task IDs only from explicit task labels or Codex status commands.
+
+    Ordinary hexadecimal strings in quoted prose are deliberately ignored. The
+    caller must still resolve each reference to one existing route owned by the
+    current sender and conversation before using it.
+    """
+    value = str(text or "")
+    if not re.search(_CODEX, value, re.I):
+        return set()
+    refs = set()
+    patterns = (
+        r"(?:上次|最近|原|之前)?\s*(?:Codex\s*)?任务\s*(?:编号|ID|号)\s*(?:是|为)?\s*[:：]?\s*[`＇']?\s*#?([a-fA-F0-9]{8,16})(?![a-fA-F0-9])",
+        r"/codex\s+(?:status|result)\s+#?([a-fA-F0-9]{8,16})(?![a-fA-F0-9])",
+    )
+    for pattern in patterns:
+        refs.update(match.lower() for match in re.findall(pattern, value, re.I))
+    return refs
+
+
+def retry_intent(text: str) -> bool:
+    """Recognize concise explicit retry/restart requests, not general follow-ups."""
+    direct = instruction_text(text)
+    if not direct or len(str(text or "")) > 12000 or direct.startswith("/"):
+        return False
+    if codex_opt_out(direct) or new_codex_conversation(direct):
+        return False
+    direct = re.sub(r"\s+", "", direct)
+    return bool(re.fullmatch(
+        r"(?:(?:请|麻烦|帮我|帮忙|这次|那就|再)\s*)*"
+        r"(?:重新提交|再提交|(?:重新)?尝试提交|重试(?:刚才|上次|之前)?(?:的)?(?:Codex)?(?:任务)?|"
+        r"重新执行(?:刚才|上次|之前)?(?:的)?(?:Codex)?(?:任务)?|"
+        r"继续(?:刚才|上次|之前)?(?:的)?(?:Codex)?任务|再跑一次|再运行一次|从头(?:再)?执行)"
+        r"(?:一下|一遍|吧|哦|呢)?[。！!？?]*",
+        direct, re.I,
+    ))
+
+
 def new_codex_conversation(text: str) -> bool:
     """Only explicit conversation controls opt out of a quoted continuation."""
     direct = instruction_text(text)
@@ -70,6 +108,8 @@ def new_codex_conversation(text: str) -> bool:
 
 def continuation_eligible(text: str) -> bool:
     direct = instruction_text(text)
+    if re.match(r"^(?:(?:请|先|暂时|现在|你)\s*)*(?:不要|别|不用|不必|无需|取消|停止)\s*(?:再|重新)?\s*(?:提交|重试|执行|运行|跑)", direct):
+        return False
     return bool(direct and len(str(text or "")) <= 12000 and not direct.startswith("/")
                 and not codex_opt_out(direct) and not new_codex_conversation(direct))
 

@@ -1,0 +1,51 @@
+{
+  "version": "v2.5.5",
+  "upstream": "https://github.com/xpzouying/xiaohongshu-mcp",
+  "files": [
+    {
+      "path": "cookies/cookies.go",
+      "original_sha256": "878afec64d840c8340c5f9586f85989e7401846f83f948f62c50a3a9a2746d8c",
+      "patched_sha256": "24d0c6ed9b0e028a53e82d5f0efe24519dc9967a7919569766aa0fa7fa365926"
+    },
+    {
+      "path": "cookies/cookies_test.go",
+      "original_sha256": "16062eeb294e5ddcd8d8078a12708d5e5d5ce994cc1e029a18e201de1bc8672b",
+      "patched_sha256": "dcf29abe338518bf3978b1fb32be32d0d2ab6118bb185e24ae7d8bd5bf8152ac"
+    },
+    {
+      "path": "handlers_api.go",
+      "original_sha256": "7493551d668f65485daf51df819558c4bab26e7169077b631ec9d8f50f484465",
+      "patched_sha256": "684fd1f4f143278c4bfc4c980172934e181f814b967a0cefbe09039a116bedec"
+    },
+    {
+      "path": "login_session.go",
+      "original_sha256": "e84206bfdbd8c4952e2120de473d3295adab23b90693591e9c4b0b6a2dc50828",
+      "patched_sha256": "c0db7132863abad3d3dd4f2f07ded92f6b25c984843b1a5199de81e99628188d"
+    },
+    {
+      "path": "login_session_test.go",
+      "original_sha256": "824bf93ec5ac0316ef3ff643c8f614ccbe8c5d26b9e4b71a4a95469ad5770d0a",
+      "patched_sha256": "86759263793f28cbaf1db553acfff91921524ea58f3f6378bfb37e0a6711f5ae"
+    },
+    {
+      "path": "service.go",
+      "original_sha256": "7946b0d2571328e4a80ef73a783263181e95471c3241331336c4748181e15c7c",
+      "patched_sha256": "3f476a4ff9fa53177fe096b2c40970fa08b210902ce06300794b381b38615a6f"
+    },
+    {
+      "path": "service_login_test.go",
+      "original_sha256": null,
+      "patched_sha256": "93153f32395919f313c8ebbf9a86874e72c98c7ebe02d9fc8b7d56e793dbb4c4"
+    },
+    {
+      "path": "xiaohongshu/login.go",
+      "original_sha256": "fef57955185e9770e75a0a84bc8cab0064e56122c05d8881b342f74b49800bd8",
+      "patched_sha256": "d86d2c576a20002f5b2359216033ecf9b6515df767b00026700d54f6e89fcc76"
+    },
+    {
+      "path": "xiaohongshu/login_browser_test.go",
+      "original_sha256": null,
+      "patched_sha256": "eff35207a98dbd7e0b68e1fe681d76b2fa8776f872b0334e8b7a771e274a798c"
+    }
+  ]
+}

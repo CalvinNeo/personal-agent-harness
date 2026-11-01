@@ -1,6 +1,6 @@
 name: intent_router
-version: 0.1.0
+version: 0.1.2
 author: local
 repo: local
-desc: 使用可配置的 low reasoning 规划器进行安全的自然语言能力路由，可 regex/light 切换。
+desc: 使用独立轻量规划器进行有界自然语言路由，失败及时降级，可 regex/light 切换。
 astrbot_version: ">=4.29.0"

@@ -2,7 +2,7 @@
   "id": "planner-minimax-light",
   "type": "openai_chat_completion",
   "name": "MiniMax M3.1 Flash Planner (low)",
-  "enable": false,
+  "enable": true,
   "api_base": "https://api.minimax.cn/v1",
   "key": ["$MINIMAX_API_KEY"],
   "model": "MiniMax-M3.1-Flash",

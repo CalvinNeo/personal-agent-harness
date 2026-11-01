@@ -15,8 +15,9 @@ from astrbot.api.event.filter import PlatformAdapterType
 from astrbot.api.message_components import Plain, Reply
 from astrbot.core.star.filter.command import GreedyStr
 
-from .core import ID_RE, TERMINAL, board, codex_opt_out, continuation_eligible, job_key, natural_codex_request, natural_query, new_codex_conversation, owner_key, query, quoted_job_id, safe_text, stamp
+from .core import ID_RE, TERMINAL, board, codex_opt_out, continuation_eligible, job_key, natural_codex_request, natural_query, new_codex_conversation, owner_key, query, quoted_job_id, quoted_task_references, retry_intent, safe_text, stamp
 from .semantic import TOOL_NAME, TOOL_SCHEMA, TOOL_DESCRIPTION, ROUTING_INSTRUCTION, semantic_eligible
+from .memory import local_memory_request
 
 STATE_PATH = Path(__file__).with_name("jobs.json")
 _SENT_IDS_EXTRA = "qqofficial_sent_message_ids"
@@ -171,8 +172,8 @@ class Main(star.Star):
             values.extend(str(getattr(item, "text", "") or "") for item in chain if isinstance(item, Plain))
         return "\n".join(values)
 
-    def _reply_parent(self, event):
-        """Only a direct reply to a known message or exact Codex board binds."""
+    def _reply_parent(self, event, *, allow_task_reference=False):
+        """Bind direct replies to receipts, boards, or owner-verified task labels."""
         owner = owner_key(event.unified_msg_origin, str(event.get_sender_id()))
         parents, replies = set(), []
         for part in event.get_messages():
@@ -183,6 +184,15 @@ class Main(star.Star):
                       if mid and route.get("owner") == owner and mid in route.get("reply_message_ids", [])}
             board_id = quoted_job_id(self._reply_text(part))
             matched = mapped or ({board_id} if board_id else set())
+            if not matched and allow_task_reference:
+                # Older assistant replies included a task label or explicit
+                # /codex status command instead of our full board marker.
+                # Resolve the short ID only against this owner's known routes.
+                for ref in quoted_task_references(self._reply_text(part)):
+                    candidates = {jid for jid, route in self.routes.items()
+                                  if route.get("owner") == owner and jid.startswith(ref)}
+                    if candidates:
+                        matched.update(candidates)
             if matched:
                 parents.update(matched)
                 replies.append(part)
@@ -370,6 +380,8 @@ class Main(star.Star):
         # never bypass the owner allowlist or grant itself a writable workspace.
         if not self._allowed(event):
             return {"ok": False, "error": "未授权的会话或发送者。"}
+        if local_memory_request(self.context, event):
+            return await respond("长期记忆由本地 SQLite 记忆插件处理，不能提交 Codex 或写成工作区 Markdown 文件；当前未创建 Codex 任务。")
         if mode not in {"read-only", "workspace-write"}:
             return await respond("无效的 Codex 执行模式。")
         if mode == "workspace-write" and str(event.get_sender_id()) not in set(self.config.get("write_senders") or []):
@@ -380,7 +392,7 @@ class Main(star.Star):
         sender, umo = str(event.get_sender_id()), event.unified_msg_origin
         owner = owner_key(umo, sender)
         try:
-            candidate, bound_replies = self._reply_parent(event)
+            candidate, bound_replies = self._reply_parent(event, allow_task_reference=parent_job_id is not None)
         except ValueError as error:
             return await respond(str(error))
         if new_codex_conversation(prompt):
@@ -461,6 +473,13 @@ class Main(star.Star):
             self.logger.info("Codex submitted id=%s owner=%s images=%d parent=%s", jid, owner[:12], len(images), parent_job_id or "none")
             return await respond(board(response["job"], time.time(), accepted=True), ok=True, job=response["job"])
 
+    def _timeout_requested(self, event: AstrMessageEvent, text: str) -> bool:
+        expected = {"event": id(event), "owner": owner_key(str(event.unified_msg_origin), str(event.get_sender_id() or "")),
+                    "text": hashlib.sha256(text.strip().encode()).hexdigest()}
+        return (event.get_extra("intent_router_timeout") == expected
+                and bool(self.config.get("auto_complex_enabled", True))
+                and semantic_eligible(text) and not codex_opt_out(text))
+
     @filter.platform_adapter_type(PlatformAdapterType.QQOFFICIAL)
     # Natural-language routing applies to both QQ group messages (which must
     # be addressed) and private/C2C messages (which AstrBot marks as awake).
@@ -474,16 +493,35 @@ class Main(star.Star):
     async def natural_status(self, event: AstrMessageEvent):
         if not event.is_at_or_wake_command:
             return
+        if event.get_extra("codex_timeout_submitted"):
+            return
         parts = event.get_messages()
         text = " ".join(part.text for part in parts if isinstance(part, Plain))
+        if local_memory_request(self.context, event):
+            return
+        if event.get_extra("xhs_notes_request") and not re.search(r"codex", text, re.I):
+            return
+        if event.get_extra("travel_local_request") and not re.search(r"codex", text, re.I):
+            return
+        if event.get_extra("intent_router_accepted") and (
+            event.get_extra("intent_router_route") in {"xhs_status", "xhs_login", "xhs_search"}
+            or event.get_extra("intent_router_route") in {"travel_search", "map_route"} and not re.search(r"codex", text, re.I)
+        ):
+            return
+        if re.search(r"(?:小红书|xhs|rednote).{0,20}(?:登录|扫码|登录态)|(?:检查|确认|查看).{0,12}(?:小红书|xhs).{0,8}状态", text, re.I) and not re.search(r"实现|开发|编写|修改.{0,12}(?:代码|程序)", text):
+            return
         quotes = []
         for part in parts:
             if isinstance(part, Reply):
                 quotes.append(str(getattr(part, "message_str", "") or ""))
                 chain = getattr(part, "chain", None) or []
                 quotes.extend(str(getattr(item, "text", "")) for item in chain if isinstance(item, Plain))
+        retry = retry_intent(text)
         try:
-            mapped_parent, _ = self._reply_parent(event)
+            # Accept the legacy, prose task label as a binding hint for any
+            # direct continuation/query. The helper still requires an explicit
+            # Codex task reference and an unambiguous owner-scoped route.
+            mapped_parent, _ = self._reply_parent(event, allow_task_reference=True)
         except ValueError:
             mapped_parent = None
         if mapped_parent:
@@ -498,7 +536,7 @@ class Main(star.Star):
             return
         if continuation_eligible(text):
             try:
-                parent_id, _ = self._reply_parent(event)
+                parent_id, _ = self._reply_parent(event, allow_task_reference=True)
             except ValueError as error:
                 self._consume(event)
                 if self._allowed(event):
@@ -507,13 +545,20 @@ class Main(star.Star):
             if parent_id:
                 self._consume(event)
                 if self._allowed(event):
+                    self.logger.info("Codex natural route source=reply parent=%s", parent_id)
                     await self._submit(event, text, "read-only", parent_job_id=parent_id)
+                return
+            if retry:
+                self._consume(event)
+                if self._allowed(event):
+                    await self._send(event, "请引用要重新提交的 Codex 任务回复，或先用 /codex tasks 查看任务；我需要据此确认任务属于当前会话，暂未提交。")
                 return
         light_codex = (bool(event.get_extra("intent_router_accepted"))
                       and event.get_extra("intent_router_route") == "codex"
                       and (bool(self.config.get("auto_complex_enabled", True)) or re.search(r"codex", text, re.I))
                       and not codex_opt_out(text))
-        request = ("read-only", text) if light_codex or new_codex_conversation(text) else natural_codex_request(
+        timeout_codex = self._timeout_requested(event, text)
+        request = ("read-only", text) if timeout_codex or light_codex or new_codex_conversation(text) else natural_codex_request(
             text, auto_complex=bool(self.config.get("auto_complex_enabled", True))
         )
         if request is None:
@@ -521,10 +566,12 @@ class Main(star.Star):
         self._consume(event)
         if not self._allowed(event):
             return
+        if timeout_codex:
+            event.set_extra("codex_timeout_submitted", True)
         mode, prompt = request
         # _submit materializes current/replied/scoped cached images and rejects
         # missing or unsupported context before it creates a runner job.
-        source = "light" if light_codex else ("explicit" if re.search(r"codex", text, re.I) else "complex")
+        source = "timeout" if timeout_codex else ("light" if light_codex else ("explicit" if re.search(r"codex", text, re.I) else "complex"))
         self.logger.info("Codex natural route source=%s owner=%s", source, owner_key(event.unified_msg_origin, str(event.get_sender_id()))[:12])
         await self._submit(event, prompt, mode)
 
@@ -533,9 +580,15 @@ class Main(star.Star):
         """Let the main model interpret unfamiliar wording using a bounded tool."""
         if (not self.config.get("natural_language_enabled", True)
                 or not self.config.get("semantic_routing_enabled", True)
+                or event.get_extra("codex_timeout_submitted")
+                or local_memory_request(self.context, event)
                 or not self._allowed(event) or not event.is_at_or_wake_command):
             return
         text = " ".join(part.text for part in event.get_messages() if isinstance(part, Plain)).strip()
+        if event.get_extra("xhs_notes_request") and not re.search(r"codex", text, re.I):
+            return
+        if (event.get_extra("travel_local_request") or event.get_extra("intent_router_route") in {"travel_search", "map_route"}) and not re.search(r"codex", text, re.I):
+            return
         if not semantic_eligible(text):
             return
         if not self.config.get("auto_complex_enabled", True) and not re.search(r"codex", text, re.I):
@@ -556,11 +609,40 @@ class Main(star.Star):
             req.system_prompt = (req.system_prompt or "").rstrip() + "\n" + ROUTING_INSTRUCTION
             event.set_extra("codex_semantic_instructions", True)
 
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=106)
+    async def mention_current_sender(self, event: AstrMessageEvent):
+        if not self._allowed(event) or not event.is_at_or_wake_command or event.get_platform_name() != "qq_official":
+            return
+        text = " ".join(part.text for part in event.get_messages() if isinstance(part, Plain)).strip()
+        if not re.fullmatch(r"(?:(?:请|帮我|麻烦你)?(?:测试(?:一下|下)?[，,\s]*)?)(?:at|@|艾特)\s*我(?:一下|下)?[。！!]*", text, re.I):
+            return
+        from astrbot.api.message_components import At
+        self._consume(event)
+        await event.send(MessageChain([At(qq=str(event.get_sender_id())), Plain("收到，这条消息已 @ 你。")], use_markdown_=True))
+
+    @filter.on_llm_request(priority=-200)
+    async def describe_available_capabilities(self, event: AstrMessageEvent, req):
+        if not self._allowed(event) or not event.is_at_or_wake_command:
+            return
+        tools = getattr(getattr(req, "func_tool", None), "tools", []) or []
+        names = sorted({str(getattr(tool, "name", "")) for tool in tools
+                        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,100}", str(getattr(tool, "name", "")))})[:50]
+        text = (
+            "[本条请求的真实工具清单] " + (", ".join(names) or "无模型可调用工具") + ". "
+            "以本条注册的工具及其返回值为准，旧聊天中‘没有工具、没有网络权限’的说法不是当前配置。"
+            "有匹配工具时实际调用，不能仅根据旧对话宣称不可用；没有受理回执时不能声称提交成功。"
+            "小红书扫码、登录状态和搜索由本机小红书工具处理，不需要启用 Computer Use，也不应交给 Codex 检查服务器。"
+            "Codex 是隔离的任务执行器，不具有机器人管理或读取其他服务凭据的权限。"
+            "仅在本条确有相应工具且用户授权时使用；缺少必要日期、附件或登录确认时说明具体缺项，不要把缺项说成工具未安装。"
+        )
+        req.system_prompt = (getattr(req, "system_prompt", "") or "").rstrip() + "\n" + text
+
     async def delegate_current_task(self, event: AstrMessageEvent):
         text = " ".join(part.text for part in event.get_messages() if isinstance(part, Plain)).strip()
         if (not self._allowed(event) or not event.is_at_or_wake_command
                 or not self.config.get("natural_language_enabled", True)
                 or not self.config.get("semantic_routing_enabled", True)
+                or local_memory_request(self.context, event)
                 or not semantic_eligible(text)
                 or event.get_extra("codex_semantic_authorized") != hashlib.sha256(text.encode()).hexdigest()
                 or not self.config.get("auto_complex_enabled", True) and not re.search(r"codex", text, re.I)):

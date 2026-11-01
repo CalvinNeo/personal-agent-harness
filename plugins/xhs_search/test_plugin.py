@@ -5,13 +5,14 @@ import importlib.util
 import json
 import logging
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 PACKAGE = "xhs_plugin_tests"
 package = types.ModuleType(PACKAGE)
 package.__path__ = [str(ROOT)]
@@ -40,6 +41,11 @@ class _Chain(list):
     pass
 
 
+class _Reply:
+    def __init__(self, message_str=""):
+        self.message_str = message_str
+
+
 star = types.SimpleNamespace(
     Star=type("Star", (), {"__init__": lambda self, _context: setattr(self, "logger", logging.getLogger("xhs-tests"))}),
     Context=object,
@@ -49,7 +55,8 @@ filters = types.SimpleNamespace(
     command=_decorator,
     event_message_type=_decorator,
     on_llm_request=_decorator,
-    EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1),
+    on_decorating_result=_decorator,
+    EventMessageType=types.SimpleNamespace(GROUP_MESSAGE=1, PRIVATE_MESSAGE=2),
 )
 modules = {
     "astrbot": types.ModuleType("astrbot"),
@@ -67,6 +74,7 @@ modules["astrbot.api.event"].MessageChain = _Chain
 modules["astrbot.api.event"].filter = filters
 modules["astrbot.api.message_components"].Plain = _Plain
 modules["astrbot.api.message_components"].Image = _Image
+modules["astrbot.api.message_components"].Reply = _Reply
 modules["astrbot.core.star.filter.command"].GreedyStr = str
 sys.modules.update(modules)
 
@@ -168,9 +176,9 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         await p.xhs(denied, "search cats")
         self.assertEqual(denied.sent, [])
         allowed = Event("search cats")
-        with patch.object(p, "_call", new=AsyncMock(return_value=[{"title": "Cat", "url": "https://x"}])) as call:
+        with patch.object(p, "_call", new=AsyncMock(return_value={"results": [{"title": "Cat", "url": "https://x"}], "references": {}})) as call:
             await p.xhs(allowed, "search cats")
-        call.assert_awaited_once_with("search", "cats", limit=5)
+        call.assert_awaited_once_with("search_bundle", "cats", limit=5)
         self.assertIn("Cat", "".join(getattr(x, "text", "") for x in allowed.sent[0]))
 
     async def test_natural_search_uses_light_task_without_regex(self):
@@ -179,9 +187,9 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         event.set_extra("intent_router_accepted", True)
         event.set_extra("intent_router_route", "xhs_search")
         event.set_extra("intent_router_task", "适合通勤的防晒")
-        with patch.object(p, "_call", new=AsyncMock(return_value=[])) as call:
+        with patch.object(p, "_call", new=AsyncMock(return_value={"results": [], "references": {}})) as call:
             await p.natural_search(event)
-        call.assert_awaited_once_with("search", "适合通勤的防晒", limit=5)
+        call.assert_awaited_once_with("search_bundle", "适合通勤的防晒", limit=5)
         self.assertTrue(event.stopped)
 
     async def test_auth_is_rejected_without_storage(self):
@@ -238,9 +246,9 @@ class Tests(unittest.IsolatedAsyncioTestCase):
     async def test_status_and_logout_use_private_service_operations(self):
         p = self.make()
         status = Event("status", umo="qq_official:FriendMessage:owner", private=True)
-        with patch.object(p, "_call", new=AsyncMock(return_value=True)) as call:
+        with patch.object(p, "_call", new=AsyncMock(return_value={"is_logged_in": True, "login_pending": False})) as call:
             await p.xhs(status, "status")
-        call.assert_awaited_once_with("login_status")
+        call.assert_awaited_once_with("login_details")
         self.assertIn("已登录", self.output(status))
         logout = Event("logout", umo="qq_official:FriendMessage:owner", private=True)
         with patch.object(p, "_call", new=AsyncMock(return_value=None)) as call:
@@ -256,7 +264,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.name for item in existing.tools], ["web_search"])
         tool = next(item for item in req.func_tool.tools if item.name == plugin.TOOL_NAME)
         self.assertEqual(set(tool.parameters["properties"]), {"query"})
-        with patch.object(p, "_call", new=AsyncMock(return_value=[])) as call:
+        with patch.object(p, "_call", new=AsyncMock(return_value={"results": [], "references": {}})) as call:
             result = json.loads(await tool.handler(event, query="收纳经验"))
             self.assertTrue(result["ok"])
             other = Event(event.parts[0].text)
@@ -266,7 +274,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
             event.sender = "changed"
             denied = json.loads(await tool.handler(event, query="other"))
             self.assertFalse(denied["ok"])
-        call.assert_awaited_once_with("search", "收纳经验", limit=5)
+        call.assert_awaited_once_with("search_bundle", "收纳经验", limit=5)
 
     async def test_semantic_tool_requires_allowed_addressed_noncommand_event(self):
         p = self.make()
@@ -326,6 +334,147 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         event.parts = [types.SimpleNamespace(text="小红书搜索猫咪")]
         self.assertEqual(plugin._text(event), "")
         self.assertIsNone((await self.install_tool(p, event)).func_tool)
+
+    async def test_historical_status_requests_use_local_service_without_codex(self):
+        p = self.make()
+        for text in ("已登录，检查下小红书的登录态", "我已经扫码登录了，你检查下状态", "我已经扫码确认了"):
+            event = Event(text, umo="qq_official:FriendMessage:owner", private=True)
+            p._pending_login[p._event_identity(event)] = time.monotonic() + 240
+            with patch.object(p, "_call", new=AsyncMock(return_value={"is_logged_in": True})) as call:
+                await p.natural_login(event)
+            call.assert_awaited_once_with("login_details")
+            self.assertTrue(event.stopped)
+            self.assertIn("已登录", self.output(event))
+            self.assertNotIn("Computer Use", self.output(event))
+
+    async def test_waiting_login_followup_does_not_replace_qr(self):
+        p = self.make()
+        event = Event("我已经扫码确认了", umo="qq_official:FriendMessage:owner", private=True)
+        p._pending_login[p._event_identity(event)] = time.monotonic() + 240
+        with patch.object(p, "_call", new=AsyncMock(return_value={"is_logged_in": False, "login_pending": True})) as call:
+            await p.natural_login(event)
+            followup = Event("再看下", umo=event.unified_msg_origin, private=True)
+            await p.natural_login(followup)
+        self.assertEqual(call.await_count, 2)
+        self.assertIn("等待", self.output(followup))
+        self.assertTrue(followup.stopped)
+
+    async def test_authorized_private_owner_can_search_and_receive_status_tool(self):
+        p = self.make()
+        event = Event("小红书搜索南京剧本杀", umo="qq_official:FriendMessage:owner", private=True)
+        p.allowed_umos.add(event.unified_msg_origin)
+        event.is_at_or_wake_command = False
+        with patch.object(p, "_call", new=AsyncMock(return_value={"results": [], "references": {}})) as call:
+            await p.natural_search(event)
+        call.assert_awaited_once_with("search_bundle", "南京剧本杀", limit=5)
+        status = Event("小红书现在可以用吗", umo=event.unified_msg_origin, private=True)
+        req = await self.install_tool(p, status)
+        self.assertIn(plugin.STATUS_TOOL_NAME, [tool.name for tool in req.func_tool.tools])
+        with patch.object(p, "_call", new=AsyncMock(return_value={"is_logged_in": False})):
+            result = json.loads(await p.semantic_status(status))
+        self.assertEqual(result["state"], "not_logged_in")
+        copied = Event(status.parts[0].text, umo=status.unified_msg_origin, private=True)
+        copied.extras = dict(status.extras)
+        self.assertFalse(json.loads(await p.semantic_status(copied))["ok"])
+
+    async def test_login_status_does_not_expand_account_permissions(self):
+        p = self.make()
+        denied = Event("已登录，检查下小红书的登录态", sender="other", umo="qq_official:FriendMessage:owner", private=True)
+        with patch.object(p, "_call", new=AsyncMock()) as call:
+            await p.natural_login(denied)
+            group = Event("检查下小红书的登录态")
+            await p.natural_login(group)
+        call.assert_not_awaited()
+        self.assertFalse(denied.stopped)
+        self.assertIn("私聊", self.output(group))
+        for text in ("不要检查小红书登录态", "例如检查小红书登录态", "如何实现小红书登录", "> 已扫码登录"):
+            self.assertIsNone(plugin.login_action(text))
+
+    async def test_status_error_does_not_claim_user_logged_out(self):
+        p = self.make()
+        event = Event("我已经扫码确认了", umo="qq_official:FriendMessage:owner", private=True)
+        p._pending_login[p._event_identity(event)] = time.monotonic() + 240
+        with patch.object(p, "_call", new=AsyncMock(side_effect=core.XHSError("unsafe", code="status_unavailable"))):
+            await p.natural_login(event)
+        self.assertIn("不代表", self.output(event))
+        self.assertNotIn("尚未登录", self.output(event))
+
+    async def test_other_service_login_is_not_claimed_and_status_permission_is_separate(self):
+        p = self.make()
+        for text in ("我已经登录了", "我已经扫码确认了", "微信已扫码登录", "飞书扫码完成了"):
+            event = Event(text, umo="qq_official:FriendMessage:owner", private=True)
+            with patch.object(p, "_call", new=AsyncMock()) as call:
+                await p.natural_login(event)
+            call.assert_not_awaited()
+            self.assertFalse(event.stopped)
+        self.assertIsNone(plugin.login_action("微信已经扫码确认了", pending=True))
+        event = Event("检查小红书登录态", umo="qq_official:FriendMessage:owner", private=True)
+        request = await self.install_tool(p, event)
+        self.assertEqual([tool.name for tool in request.func_tool.tools], [plugin.STATUS_TOOL_NAME])
+        self.assertFalse(json.loads(await p.semantic_search(event, "cats"))["ok"])
+
+    async def test_search_refresh_returns_continuation_before_reading_note(self):
+        instance = self.make()
+        event = Event("总结小红书笔记，要带图")
+        await self.install_tool(instance, event)
+        bundle = {"results": [], "references": {"synthetic-note": {"feed_id": "synthetic-note", "xsec_token": "synthetic-access"}}}
+        note = {"note_id": "synthetic-note", "title": "合成笔记", "body": "合成正文", "image_urls": []}
+        with patch.object(instance, "_call", new=AsyncMock(side_effect=[bundle, note])) as call:
+            first = json.loads(await instance.semantic_read_notes(event, query="桌游"))
+            self.assertTrue(first["ok"])
+            self.assertEqual(first["status"], "references_ready")
+            self.assertEqual(first["notes"], [])
+            self.assertEqual(first["image_count"], 0)
+            self.assertNotIn("synthetic-access", json.dumps(first))
+            call.assert_awaited_once_with("search_bundle", "桌游", limit=5)
+            result = await instance.semantic_read_notes(event, **first["next_arguments"])
+        document = json.loads(next(item.text for item in result.content if item.type == "text"))
+        self.assertTrue(document["ok"])
+        self.assertEqual(document["notes"][0]["body"], "合成正文")
+        self.assertEqual(call.await_count, 2)
+
+    async def test_note_detail_uses_remaining_budget_without_premature_cutoff(self):
+        original_wait_for = asyncio.wait_for
+        for elapsed, expected_timeout in ((34, 66), (0, 90), (90, 10), (91, None)):
+            with self.subTest(elapsed=elapsed):
+                instance = self.make()
+                event = Event("总结小红书笔记，要带图")
+                await self.install_tool(instance, event)
+                instance._note_references.put(instance._event_identity(event), "桌游", {
+                    "synthetic-note": {"feed_id": "synthetic-note", "xsec_token": "synthetic-access"},
+                })
+                note = {"note_id": "synthetic-note", "title": "合成笔记", "body": "合成正文", "image_urls": []}
+                observed = []
+
+                async def timed_wait(awaitable, *, timeout):
+                    observed.append(timeout)
+                    return await original_wait_for(awaitable, timeout=timeout)
+
+                clock = types.SimpleNamespace(monotonic=unittest.mock.Mock(side_effect=[100, 100 + elapsed]))
+                with patch.object(plugin, "time", clock), patch.object(plugin.asyncio, "wait_for", timed_wait), patch.object(
+                    instance, "_call", new=AsyncMock(return_value=note)
+                ) as call:
+                    result = await instance.semantic_read_notes(event)
+                document = json.loads(next(item.text for item in result.content if item.type == "text"))
+                if expected_timeout is None:
+                    call.assert_not_awaited()
+                    self.assertFalse(document["ok"])
+                    self.assertEqual(document["failures"][0]["code"], "time_budget")
+                    self.assertEqual(observed, [])
+                else:
+                    self.assertTrue(document["ok"])
+                    self.assertEqual(observed, [expected_timeout])
+                    self.assertLessEqual(observed[0], 105 - elapsed - 5)
+
+    async def test_planner_status_route_uses_account_permission(self):
+        p = self.make()
+        event = Event("确认一下账户是否就绪", umo="qq_official:FriendMessage:owner", private=True)
+        event.set_extra("intent_router_accepted", True)
+        event.set_extra("intent_router_route", "xhs_status")
+        with patch.object(p, "_call", new=AsyncMock(return_value={"is_logged_in": True})) as call:
+            await p.natural_login(event)
+        call.assert_awaited_once_with("login_details")
+        self.assertTrue(event.stopped)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ _QQ_DOMAINS = ("qpic.cn", "qlogo.cn", "gtimg.cn", "gtimg.com")
 _QQ_HOSTS = {"multimedia.nt.qq.com", "multimedia.nt.qq.com.cn"}
 _UNSUPPORTED = {"File", "Video", "Forward", "Node", "Record"}
 _MISSING_REFERENCE = re.compile(r"(?:刚才|刚刚|刚发|前面|上面|之前|最近).{0,24}(?:图片|照片|截图|图|张)|(?:这|那)(?:几|一|两|三|四)?张(?:图|照片)?")
+_CACHE_REQUEST = re.compile(r"图片|照片|截图|图(?![书表形案库标鉴册文纸])|\b(?:images?|photos?|pictures?)\b|(?:看看?|看下|看一下)(?:这|那)(?:个|些)?(?:是什么|是啥)", re.I)
 _PLACEHOLDER = re.compile(r"\[(?:图片|图像|照片|image|视频|文件|语音|转发消息)\]", re.I)
 
 
@@ -265,11 +266,13 @@ async def _select_cache(event, selector) -> list[str]:
 
 
 async def _cached_refs(event, context) -> list[str]:
+    text = " ".join(str(getattr(part, "text", "")) for part in event.get_messages() if type(part).__name__ == "Plain")
+    if not _CACHE_REQUEST.search(text) and not _MISSING_REFERENCE.search(text):
+        return []
     selector = await _cache_selector(context)
     refs = await _select_cache(event, selector) if selector is not None else []
     if refs:
         return refs
-    text = " ".join(str(getattr(part, "text", "")) for part in event.get_messages() if type(part).__name__ == "Plain")
     if _MISSING_REFERENCE.search(text):
         raise ContextError("当前无法读取你之前发的图片，请在这条任务中重新附上原图。")
     return []

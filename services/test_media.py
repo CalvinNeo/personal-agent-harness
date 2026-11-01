@@ -258,7 +258,7 @@ class ImageJobTests(unittest.IsolatedAsyncioTestCase):
         data = json.dumps(req).encode() + b"\n"
         self.assertGreater(len(data), 65536)
         sock = str(self.root / "bridge.sock")
-        with patch.object(r, "peer_uid", return_value=996):
+        with patch.object(r, "peer_uid", return_value=996), patch.object(r, "ALLOWED_UIDS", {996}):
             server = await asyncio.start_unix_server(lambda reader, writer: r.handle(reader, writer, self.manager), path=sock, limit=r.MAX_REQUEST)
             async with server:
                 reader, writer = await asyncio.open_unix_connection(sock)

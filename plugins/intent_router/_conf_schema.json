@@ -3,7 +3,7 @@
     "type": "string",
     "default": "regex",
     "enum": ["regex", "light"],
-    "description": "regex=现有正则路径；light=先用配置的 low reasoning 模型做静态路由，失败回退正则"
+    "description": "regex=现有正则路径；light=独立轻量模型提示，超时由 Codex 桥接按原权限只读接管；部署模板默认 light"
   },
   "provider_id": {
     "type": "string",
@@ -13,7 +13,7 @@
   "model": {
     "type": "string",
     "default": "MiniMax-M3.1-Flash",
-    "description": "规划模型；reasoning_effort=low 应写在 provider custom_extra_body"
+    "description": "规划模型；Flash 强制 thinking，provider custom_extra_body 应设 reasoning_effort=low"
   },
   "allowed_umos": {
     "type": "list",
@@ -29,7 +29,7 @@
   },
   "timeout_seconds": {
     "type": "float",
-    "default": 3.0,
+    "default": 2.0,
     "minimum": 0.5,
     "maximum": 10.0
   },

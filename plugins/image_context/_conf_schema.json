@@ -8,5 +8,10 @@
     "description": "允许的发送者 OpenID（空列表表示允许已授权群内成员）",
     "type": "list",
     "default": []
+  },
+  "cache_file": {
+    "description": "图片引用缓存文件的绝对路径；留空则禁用跨重启缓存。文件仅保存已授权会话的 QQ 图片引用，TTL 30 分钟，权限自动限制为 0600",
+    "type": "string",
+    "default": "/var/lib/astrbot/data/plugins/image_context/image_cache.json"
   }
 }
