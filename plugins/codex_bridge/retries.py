@@ -10,7 +10,7 @@ from .core import job_key
 FAILURE_STATES = frozenset({"failed", "timed_out", "interrupted"})
 MUTATING_TOOLS = frozenset({"manage_long_term_memory", "create_schedule_reminders", "create_current_reminder",
     "cancel_current_reminder", "xhs_login", "xhs_logout", "create_scheduled_task", "manage_scheduled_task",
-    "set_current_reply_recipient", "create_codex_subtasks", "xianyu_login", "create_xianyu_watch", "manage_xianyu_watch"})
+    "set_current_reply_recipient", "create_codex_subtasks", "xianyu_login", "xianyu_search", "create_xianyu_watch", "manage_xianyu_watch", "show_xianyu_baseline"})
 
 
 def failure_reason(job):

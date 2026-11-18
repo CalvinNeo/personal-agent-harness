@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from test_plugin import At, Event, JID, Plain, Reply, UMO, job, plugin
+from test_plugin import At, Chain, Event, JID, Plain, Reply, UMO, job, plugin
 
 
 class Result:
@@ -27,6 +27,113 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.bridge._rpc = AsyncMock(return_value={"ok": True, "job": job(conversation_id=JID)})
 
     def tearDown(self): self.temp.cleanup()
+
+    async def test_native_baseline_pages_resume_after_known_rejection_and_restart(self):
+        cid = "e" * 32
+        route = {"id": JID, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice"}
+        self.bridge.routes[JID] = route
+        pages = [Chain([Plain(f"{index + 1}. [Synthetic item](https://www.goofish.com/item?id={100 + index})")], use_markdown_=True) for index in range(4)]
+        registry = types.SimpleNamespace(execute_codex=AsyncMock(return_value={"ok": True, "delivery_pending": True,
+            "delivery_plan": {"total_items": 4, "chunk_count": 4}}), drain_deliveries=lambda _: pages,
+            trusted_text_delivery=lambda _, chain: chain.use_markdown_ is True, recipient=None)
+        self.context.send_message.side_effect = [True, False]
+        await self.bridge._execute_tool_call(route, registry, cid, "show_xianyu_baseline", {})
+        receipt = route["tool_receipts"][cid]
+        self.assertEqual(receipt["result"]["code"], "text_delivery_failed")
+        self.assertEqual(receipt["text_plan"]["next"], 1)
+        restarted = plugin.Main(self.context, {"allowed_umos": [UMO]})
+        restarted.routes_file = self.bridge.routes_file
+        restarted._load()
+        restarted._rpc = AsyncMock(return_value={"ok": True})
+        self.context.send_message.reset_mock(side_effect=True)
+        self.context.send_message.return_value = True
+        await restarted._execute_tool_call(restarted.routes[JID], registry, cid, "show_xianyu_baseline", {})
+        result = restarted.routes[JID]["tool_receipts"][cid]["result"]
+        self.assertTrue(result["complete"] and result["text_delivered"])
+        self.assertEqual(result["delivered_count"], 4)
+        self.assertEqual(self.context.send_message.await_count, 3)
+        self.assertTrue(all(call.args[1].use_markdown_ for call in self.context.send_message.call_args_list))
+        self.assertTrue(self.context.send_message.call_args_list[0].args[1].chain[0].text.startswith("2."))
+        registry.execute_codex.assert_awaited_once()
+        self.context.send_message.reset_mock()
+        await restarted._execute_tool_call(restarted.routes[JID], registry, cid, "show_xianyu_baseline", {})
+        self.context.send_message.assert_not_awaited()
+
+    async def test_native_page_crash_is_uncertain_and_does_not_duplicate(self):
+        route = {"id": JID, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice"}
+        self.bridge.routes[JID] = route
+        receipt = {"text_plan": {"pages": ["A", "B"], "next": 1, "sending": 1, "result": {"ok": True}}}
+        result = await self.bridge._deliver_tool_text_plan(route, receipt)
+        self.assertEqual(result["code"], "delivery_uncertain")
+        self.assertFalse(result["complete"])
+        self.context.send_message.assert_not_awaited()
+
+    async def test_failed_execution_retry_inherits_page_progress_without_rerunning_display(self):
+        import hashlib
+        cid = "d" * 32
+        fingerprint = hashlib.sha256(json.dumps(["show_xianyu_baseline", {}], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        original = {"id": "a" * 16, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice",
+            "tool_receipts": {"a" * 32: {"name": "show_xianyu_baseline", "fingerprint": fingerprint, "state": "complete",
+                "text_plan": {"pages": ["first page", "second page"], "next": 1, "sending": None,
+                    "result": {"ok": True, "delivery_plan": {"total_items": 20, "chunk_count": 2}}}}}}
+        route = {"id": JID, "owner": original["owner"], "umo": UMO, "sender": "alice", "auto_retry_of": original["id"]}
+        self.bridge.routes.update({original["id"]: original, JID: route})
+        registry = types.SimpleNamespace(execute_codex=AsyncMock(), recipient=None)
+        await self.bridge._execute_tool_call(route, registry, cid, "show_xianyu_baseline", {})
+        registry.execute_codex.assert_not_awaited()
+        self.context.send_message.assert_awaited_once()
+        self.assertEqual(self.context.send_message.call_args.args[1].chain[0].text, "second page")
+        self.assertTrue(route["tool_receipts"][cid]["result"]["complete"])
+
+    async def test_missing_display_page_is_rejected_before_any_page_is_sent(self):
+        route = {"id": JID, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice"}
+        self.bridge.routes[JID] = route
+        registry = types.SimpleNamespace(execute_codex=AsyncMock(return_value={"ok": True,
+            "delivery_plan": {"chunk_count": 2, "total_items": 20}}), recipient=None,
+            drain_deliveries=lambda _: [Chain([Plain("one page")], use_markdown_=True)],
+            trusted_text_delivery=lambda *_: True)
+        await self.bridge._execute_tool_call(route, registry, "b" * 32, "show_xianyu_baseline", {})
+        self.context.send_message.assert_not_awaited()
+        self.assertEqual(route["tool_receipts"]["b" * 32]["result"]["code"], "display_missing")
+
+    async def test_trusted_normal_handoff_sends_only_remaining_pages_and_counts_all(self):
+        route = {"id": JID, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice"}
+        self.bridge.routes[JID] = route
+        receipt = {"ok": True, "delivery_plan": {"chunk_count": 4, "total_items": 40}}
+        registry = types.SimpleNamespace(execute_codex=AsyncMock(return_value=receipt), recipient=None,
+            drain_deliveries=lambda _: [Chain([Plain("remaining page " + str(i))], use_markdown_=True) for i in range(3)],
+            trusted_text_delivery=lambda *_: True,
+            trusted_text_progress=lambda *_: {"delivered_chunks": 1, "remaining_chunks": 3, "complete": False})
+        await self.bridge._execute_tool_call(route, registry, "c" * 32, "show_xianyu_baseline", {})
+        self.assertEqual(self.context.send_message.await_count, 3)
+        result = route["tool_receipts"]["c" * 32]["result"]
+        self.assertTrue(result["complete"])
+        self.assertEqual((result["delivered_chunks"], result["delivered_count"]), (4, 40))
+
+    async def test_empty_actual_qq_receipt_keeps_page_uncertain_and_replay_checks_current_authorization(self):
+        route = {"id": JID, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice"}
+        self.bridge.routes[JID] = route
+        receipt = {"name": "show_xianyu_baseline", "text_plan": {"pages": ["page"], "next": 0, "sending": None,
+            "result": {"ok": True, "delivery_plan": {"chunk_count": 1, "total_items": 1}}}}
+        async def no_qq_receipt(scope, chain):
+            chain.qqofficial_sent_message_ids = []
+        self.context.send_message.side_effect = no_qq_receipt
+        denied = types.SimpleNamespace(text_delivery_allowed=lambda *_: False)
+        result = await self.bridge._deliver_tool_text_plan(route, receipt, denied)
+        self.assertEqual(result["code"], "not_authorized")
+        self.context.send_message.assert_not_awaited()
+        result = await self.bridge._deliver_tool_text_plan(route, receipt)
+        self.assertEqual(result["code"], "delivery_uncertain")
+        self.assertEqual(receipt["text_plan"]["next"], 0)
+        self.assertEqual(receipt["text_plan"]["sending"], 0)
+
+    async def test_arbitrary_tool_plain_output_cannot_bypass_model_reply(self):
+        route = {"id": JID, "owner": plugin.owner_key(UMO, "alice"), "umo": UMO, "sender": "alice"}
+        self.bridge.routes[JID] = route
+        registry = types.SimpleNamespace(execute_codex=AsyncMock(return_value={"ok": True}),
+            drain_deliveries=lambda _: [Chain([Plain("untrusted tool prose")], use_markdown_=True)], recipient=None)
+        await self.bridge._execute_tool_call(route, registry, "f" * 32, "other_tool", {})
+        self.context.send_message.assert_not_awaited()
 
     async def test_exact_generated_reply_does_not_echo_topic_and_decorates_native_at(self):
         event = Event("向我老婆讲解一下汗液疗法")

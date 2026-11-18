@@ -9,19 +9,21 @@ from astrbot.api.message_components import Image,Plain,Reply
 from astrbot.core.star.filter.command import GreedyStr
 from astrbot.core.pipeline.preprocess_stage.voice_input import get_voice_input_text
 from .client import XianyuClient,XianyuError
+from .formatting import baseline_pages,delivery_plan,paginate_products,product_markdown,markdown_text
 from .watcher import STATES,normalize_keywords,normalize_item,merge_pending,mark_alert_delivered,compact_record,normalize_max_price,matches_price,baseline_snapshot,baseline_view
 
 DEFAULT_ENDPOINT='http://127.0.0.1:18070';DEFAULT_TOKEN='/etc/xianyu/api-token'
-TOOL_NAME='create_xianyu_watch';LIST_NAME='list_xianyu_watches';MANAGE_NAME='manage_xianyu_watch';READ_NAME='read_xianyu_watch'
+TOOL_NAME='create_xianyu_watch';LIST_NAME='list_xianyu_watches';MANAGE_NAME='manage_xianyu_watch';READ_NAME='read_xianyu_watch';SHOW_NAME='show_xianyu_baseline'
 _UNSET=object()
 PRICE_SCHEMA={'type':'number','exclusiveMinimum':0,'maximum':1000000000,'description':'商品标价必须严格小于此上限（不含等于）；未知、面议、范围、定金、运费价不视为合规。'}
 TOOL_SCHEMA={'type':'object','properties':{'keywords':{'type':'array','minItems':1,'maxItems':5,'description':'1至5个具体搜索词组，可使用相关同义词扩展。','items':{'type':'string','minLength':1,'maxLength':100}},'interval_minutes':{'type':'integer','minimum':5,'maximum':10080,'default':30},'max_results':{'type':'integer','minimum':1,'maximum':20},'max_price':PRICE_SCHEMA},'required':['keywords'],'additionalProperties':False}
 READ_SCHEMA={'type':'object','properties':{'watch_id':{'type':'string','pattern':'^[a-f0-9]{16}$'},'offset':{'type':'integer','minimum':0,'maximum':10000,'default':0},'limit':{'type':'integer','minimum':1,'maximum':50,'default':20},'refresh_metadata':{'type':'boolean','default':False,'description':'仅明确要求补回旧基线详情时启用；当前查询只补原ID缺失字段，不添加新ID、不发提醒、不改变下次执行时间。'}},'required':['watch_id'],'additionalProperties':False}
+SHOW_SCHEMA={'type':'object','properties':{'watch_id':{'type':'string','pattern':'^[a-f0-9]{16}$'},'matching_only':{'type':'boolean','default':True,'description':'默认展示全部已知匹配的基线商品；false展示全部原ID并明确标注未恢复详情。'}},'required':['watch_id'],'additionalProperties':False}
 MANAGE_SCHEMA={'type':'object','properties':{'watch_id':{'type':'string','pattern':'^[a-f0-9]{16}$'},'action':{'type':'string','enum':['pause','resume','cancel','update']},'max_price':{**PRICE_SCHEMA,'type':['number','null'],'description':'update时设置严格价格上限；null明确取消价格限制。'},'interval_minutes':{'type':'integer','minimum':5,'maximum':10080},'max_results':{'type':'integer','minimum':1,'maximum':20}},'required':['watch_id','action'],'additionalProperties':False}
 
 SEARCH_NAME='xianyu_search'
 SEARCH_SCHEMA={'type':'object','properties':{'query':{'type':'string','minLength':1,'maxLength':100,'description':'当前要找的闲鱼商品关键词'},'limit':{'type':'integer','minimum':1,'maximum':20,'default':10}},'required':['query'],'additionalProperties':False}
-ROUTING='''[闲鱼监控：用户明确要求定期搜索新商品时，使用create_xianyu_watch。你应根据用户的实际购买目标和当前聊天资料构造1至5个具体关键词；缺少购买目标时先读取当前聊天或询问，不把“闲鱼”“提醒”等功能词当关键词。默认每30分钟查询；首次只建立已见基线，之后只提醒首次发现的商品。提醒接收人自动绑定原会话，不填其他UMO。必须登录才能检索；未登录时保存监控草案，使用已授权群聊或私聊的 /闲鱼 login 扫码，再 /闲鱼 status 确认。不得接收密码、Cookie、Token。商品名称、价格和链接由服务端依据实际结果生成，默认不发送商品图片，不能编造。已授权会话共享监控列表、详情和管理，投递目标始终为创建时原会话。列表用list_xianyu_watches，详情和完整首次基线用read_xianyu_watch分页读取，不得把空列表猜成没有监控。预算必须把max_price传给create或manage update，比较为严格小于；未传入时不能承诺已启用预算过滤。暂停/恢复/取消/条件更新使用manage_xianyu_watch。首次基线总数和符合条件数分别汇报；旧版只有ID时明确详情缺失，补回须read的refresh_metadata=true，恢复时间不代表首次价格。新发现表示首次被该监控发现，不保证平台精确发布时间。]'''
+ROUTING='''[闲鱼监控：用户明确要求定期搜索新商品时，使用create_xianyu_watch。你应根据用户的实际购买目标和当前聊天资料构造1至5个具体关键词；缺少购买目标时先读取当前聊天或询问，不把“闲鱼”“提醒”等功能词当关键词。默认每30分钟查询；首次只建立已见基线，之后只提醒首次发现的商品。提醒接收人自动绑定原会话，不填其他UMO。必须登录才能检索；未登录时保存监控草案，使用已授权群聊或私聊的 /闲鱼 login 扫码，再 /闲鱼 status 确认。不得接收密码、Cookie、Token。商品名称、价格和链接由服务端依据实际结果生成，默认不发送商品图片，不能编造。已授权会话共享监控列表、详情和管理，投递目标始终为创建时原会话。列表用list_xianyu_watches，内部分析详情用read_xianyu_watch分页读取；用户问基线有哪些、那些商品或完整清单时，必须用show_xianyu_baseline把全部匹配条目和真实商品名称链接直接分页展示，不得只回复数量、摘要或让用户再要求展开。show和xianyu_search返回投递计划后，仅在桥接器确认送达后简短确认，不再重复改写商品清单。不得把空列表猜成没有监控。预算必须把max_price传给create或manage update，比较为严格小于；未传入时不能承诺已启用预算过滤。暂停/恢复/取消/条件更新使用manage_xianyu_watch。首次基线总数和符合条件数分别汇报；旧版只有ID时明确详情缺失，补回须read的refresh_metadata=true，恢复时间不代表首次价格。新发现表示首次被该监控发现，不保证平台精确发布时间。]'''
 
 def ident(event):return (str(event.unified_msg_origin),str(event.get_sender_id() or ''))
 def owner(event):return hashlib.sha256(('\0'.join(ident(event))).encode()).hexdigest()
@@ -149,6 +151,7 @@ class Main(star.Star):
   return [{'name':TOOL_NAME,'description':'创建当前会话的闲鱼新商品监控（最多5个关键词）。预算需传max_price，价格严格小于；默认30分钟。首次保存全部商品快照，后续只提醒新ID中符合条件的商品，默认不发图。','parameters':TOOL_SCHEMA,'handler':self._create},
    {'name':LIST_NAME,'description':'列出所有仍授权共享会话中的闲鱼监控、价格条件、基线总数/已知符合数、下次执行和错误状态。','parameters':{'type':'object','properties':{},'additionalProperties':False},'handler':self._list},
    {'name':READ_NAME,'description':'分页读取授权共享监控的状态和完整首次商品基线（名称、标价、链接、观察时间）。旧ID详情缺失明确返回不可用；显式refresh_metadata只按当前查询补同ID，标恢复时刻且不发通知。','parameters':READ_SCHEMA,'handler':self._read},
+   {'name':SHOW_NAME,'description':'把授权共享监控的完整基线清单直接分块展示给当前QQ会话，默认全部已知匹配商品。每件商品含可点击名称和真实标价，不截标题或链接；工具只回短投递回执，最终仅简短确认，勿重新摘录或省略清单。','parameters':SHOW_SCHEMA,'handler':self._show_baseline},
    {'name':MANAGE_NAME,'description':'按用户要求暂停、恢复、取消或update授权共享闲鱼监控。update可改max_price、interval_minutes、max_results；不清空已见ID或原基线，不改变原提醒会话。','parameters':MANAGE_SCHEMA,'handler':self._manage}]
  async def _search(self,keyword,limit):return await asyncio.to_thread(self.client().search,keyword,limit)
  async def _create(self,event,keywords,interval_minutes=30,max_results=10,max_price=None,_codex_call=None):
@@ -204,6 +207,33 @@ class Main(star.Star):
    async with self._lock:
     item=self.records[str(watch_id)]
     return {'ok':True,'watch':self.public(item),'baseline':baseline_view(item,offset,limit),**({'metadata_refresh':refresh} if refresh is not None else {})}
+ async def _emit_product_pages(self,event,pages,tool,watch_id=None):
+  scope,sender=ident(event);plan=delivery_plan(tool,pages,scope=scope,sender=sender,watch_id=watch_id)
+  prepared=0
+  for index,page in enumerate(pages):
+   async with self._lock:
+    if not self._allowed(event) or watch_id is not None and not self._watch_visible(event,self.records.get(watch_id)):
+     return {'ok':False,'code':'not_authorized','delivery_plan':plan,'prepared_chunks':prepared,'delivery_pending':bool(prepared)}
+   chain=MessageChain([Plain(page['text'])]);chain.use_markdown_=True;chain.use_t2i_=False
+   chain.xianyu_delivery={**plan,'chunk_index':index,'item_count':page['item_count']}
+   try:
+    if await event.send(chain) is False:raise RuntimeError('display_rejected')
+   except asyncio.CancelledError:raise
+   except Exception:
+    return {'ok':False,'code':'display_delivery_failed','delivery_plan':plan,'prepared_chunks':prepared,'delivery_pending':bool(prepared),'notice':'完整清单尚未确认送达；请由桥接器依据分页回执恢复，不能声称已发送全部商品。'}
+   prepared+=1
+  return {'ok':True,'markdown':True,'delivery_pending':True,'delivery_plan':plan,'notice':'完整商品清单已按原生Markdown分块准备；请仅简短确认投递结果，不要重新摘录或重复商品列表。'}
+ async def _show_baseline(self,event,watch_id,matching_only=True,_codex_call=None):
+  if not self._semantic_ok(event,SHOW_NAME,_codex_call):return {'ok':False,'code':'storage_unavailable' if not self._storage_ok else 'not_authorized'}
+  if not isinstance(watch_id,str) or not re.fullmatch(r'[a-f0-9]{16}',watch_id) or type(matching_only) is not bool:return {'ok':False,'code':'invalid_arguments'}
+  async with self._lock:
+   item=self.records.get(watch_id)
+   if not self._watch_visible(event,item):return {'ok':False,'code':'not_found'}
+   snapshot=copy.deepcopy(item)
+  try:rendered=baseline_pages(snapshot,matching_only)
+  except (ValueError,TypeError,KeyError):return {'ok':False,'code':'baseline_display_invalid','notice':'基线详情未通过展示校验，未生成不完整或猜测的商品清单。'}
+  receipt=await self._emit_product_pages(event,rendered['pages'],SHOW_NAME,watch_id)
+  return {**receipt,'baseline_total':rendered['baseline_total'],'known_matching_count':rendered['known_matching_count'],'details_unavailable_count':rendered['details_unavailable_count']}
  async def _manage(self,event,watch_id,action,max_price=_UNSET,interval_minutes=None,max_results=None,_codex_call=None):
   if not self._semantic_ok(event,MANAGE_NAME,_codex_call):return {'ok':False,'code':'not_authorized'}
   if not isinstance(watch_id,str) or not re.fullmatch(r'[a-f0-9]{16}',watch_id):return {'ok':False,'code':'invalid_arguments'}
@@ -330,11 +360,12 @@ class Main(star.Star):
    if self.cfg.get('send_product_images',False) is True and row.get('image_url'):
     try:image=await asyncio.to_thread(self.client().download_image,row['image_url'])
     except Exception:pass
-   parts=[Plain('闲鱼发现新商品（首次发现）\n'+safe(row['title'])+'\n价格：'+safe(row['price'],120)+'\n'+row['url']+'\n提醒编号：'+aid)]
+   parts=[Plain('闲鱼发现新商品（首次发现）\n'+product_markdown(row)+'\n提醒编号：'+aid)]
    if isinstance(image,bytes) and 0<len(image)<=2*1024*1024:parts.append(Image.fromBytes(image))
    elif self.cfg.get('send_product_images',False) is True:parts.append(Plain('\n商品图片暂不可用。'))
    try:
-    sent=await asyncio.wait_for(self.context.send_message(target,MessageChain(parts)),timeout=60)
+    chain=MessageChain(parts);chain.use_markdown_=True;chain.use_t2i_=False
+    sent=await asyncio.wait_for(self.context.send_message(target,chain),timeout=60)
     if sent is False:raise RuntimeError('delivery_rejected')
    except asyncio.CancelledError:raise
    except Exception:
@@ -398,20 +429,28 @@ class Main(star.Star):
   except Exception:return {'ok':False,'code':'search_unavailable','error':'闲鱼查询暂时失败，未取得商品数据。'}
   if not isinstance(result,dict) or result.get('ok') is not True:return {'ok':False,'code':(result or {}).get('error','search_unavailable') if isinstance(result,dict) else 'search_unavailable','error':'闲鱼查询未成功，不能把失败当作没有商品。'}
   rows=result.get('results')
-  if not isinstance(rows,list):return {'ok':False,'code':'response_invalid'}
-  if self.cfg.get('send_product_images',False) is not True:
-   return {**result,'results':[{key:value for key,value in row.items() if key!='image_url'} for row in rows],
-    'ok':True,'query':query.strip(),'image_count':0,
-    'notice':'仅返回商品名称、标价和链接；只代表本次查询范围，运费、定金及最终到手价尚需核实。'}
+  if not isinstance(rows,list) or len(rows)>limit:return {'ok':False,'code':'response_invalid'}
+  try:
+   normalized=[normalize_item(row) for row in rows]
+   heading='闲鱼商品查询：'+markdown_text(query.strip())+'\n本次返回 '+str(len(normalized))+' 件；只代表本次平台返回范围。标价不代表运费、定金或最终到手价已核实。'
+   pages=paginate_products(normalized,heading,empty_text='本次查询未返回商品；这不代表全站没有商品。')
+   output=[{key:value for key,value in row.items() if key!='image_url'} if self.cfg.get('send_product_images',False) is not True else dict(row) for row in rows]
+   for row,canonical in zip(output,normalized):row['url']=canonical['url'];row['display_markdown']=product_markdown(canonical)
+  except (ValueError,TypeError,KeyError):return {'ok':False,'code':'response_invalid'}
+  receipt=await self._emit_product_pages(event,pages,SEARCH_NAME)
+  if receipt.get('ok') is not True:return {**receipt,'query':query.strip(),'results':output,'image_count':0}
   image_count=0
-  for row in rows[:3]:
-   if not row.get('image_url'):continue
-   try:image=await asyncio.to_thread(self.client().download_image,row['image_url'])
-   except Exception:image=None
-   if isinstance(image,bytes) and 0<len(image)<=2*1024*1024:
-    sent=await event.send(MessageChain([Plain(safe(row.get('title',''))+'\n价格：'+safe(row.get('price',''))+'\n'+str(row.get('url',''))),Image.fromBytes(image)]))
-    if sent is not False:image_count+=1
-  return {**result,'ok':True,'query':query.strip(),'image_count':image_count,'notice':'只代表闲鱼本次返回范围；价格来自实际标价，运费、定金、缺件和最终到手价尚需核实。不能声称全站最低价。'}
+  if self.cfg.get('send_product_images',False) is True:
+   for row in normalized[:3]:
+    if not row.get('image_url'):continue
+    try:image=await asyncio.to_thread(self.client().download_image,row['image_url'])
+    except Exception:image=None
+    if isinstance(image,bytes) and 0<len(image)<=2*1024*1024:
+     chain=MessageChain([Plain(product_markdown(row)),Image.fromBytes(image)]);chain.use_markdown_=True;chain.use_t2i_=False
+     sent=await event.send(chain)
+     if sent is not False:image_count+=1
+  return {**result,**receipt,'results':output,'query':query.strip(),'image_count':image_count}
+
  async def semantic_search(self,event,query,limit=10,_codex_call=None):return await self._search_reply(event,query,limit)
  def _login_request_allowed(self,event):
   return self._login_allowed(event) and (private(event) or bool(getattr(event,'is_at_or_wake_command',False)))

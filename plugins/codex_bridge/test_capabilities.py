@@ -165,6 +165,200 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             item.start()
             self.addCleanup(item.stop)
 
+    async def native_display_registry(self):
+        module = types.ModuleType("synthetic_xianyu_display")
+        module.SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                                "required": ["query"], "additionalProperties": False}
+        module_patch = patch.dict(sys.modules, {module.__name__: module})
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
+        class Display(Plugin):
+            __module__ = module.__name__
+            def __init__(inner):
+                super().__init__()
+                inner.records = {"a" * 16: {"umo": UMO}}
+                inner.watch_visible = True
+                inner.before_return = None
+            def _login_allowed(self, event): return False
+            def _login_status_allowed(self, event): return False
+            def _watch_visible(inner, event, item):
+                return inner._allowed(event) and inner.watch_visible and isinstance(item, dict) and item.get("umo") == UMO
+            async def emit(inner, source, name):
+                inner.calls += 1
+                from astrbot.api.event import MessageChain
+                plan = {"version": 1, "tool": name, "plan_id": "b" * 64, "total_items": 2, "chunk_count": 2}
+                if name == "show_xianyu_baseline":
+                    plan["watch_id"] = "a" * 16
+                for index in range(2):
+                    chain = MessageChain([Plain(f"{index + 1}. [Synthetic item](https://www.goofish.com/item?id={100 + index})")], use_markdown_=True)
+                    chain.xianyu_delivery = {**plan, "chunk_index": index, "item_count": 1}
+                    await source.send(chain)
+                if inner.before_return:
+                    await inner.before_return()
+                return {"ok": True, "delivery_pending": True, "delivery_plan": plan}
+            async def _search_reply(inner, source, query, limit):
+                return await inner.emit(source, "xianyu_search")
+            async def provide_watch_tools(inner, event, request):
+                async def show(source, *, _codex_call=None):
+                    inner.trusted = bool(_codex_call and _codex_call(source, "show_xianyu_baseline"))
+                    return await inner.emit(source, "show_xianyu_baseline")
+                request.func_tool = types.SimpleNamespace(tools=[types.SimpleNamespace(
+                    name="show_xianyu_baseline", description="Native display", parameters=capabilities._EMPTY, handler=show)])
+        display = Display()
+        metadata = types.SimpleNamespace(name="xianyu_watch", activated=True, star_cls=display)
+        registry = await capabilities.CapabilityRegistry(types.SimpleNamespace(get_all_stars=lambda: [metadata]), self.event).prepare()
+        return registry, display, metadata
+
+    async def test_native_baseline_is_captured_and_attested_without_sending_from_restored_event(self):
+        registry, display, metadata = await self.native_display_registry()
+        result = await registry.execute_codex("show_xianyu_baseline", {}, "display:1")
+        self.assertTrue(display.trusted)
+        self.assertTrue(result["delivery_pending"])
+        self.assertEqual(self.event.sent, [])
+        pages = registry.codex_deliveries("display:1")
+        self.assertEqual(len(pages), 2)
+        self.assertTrue(all(registry.trusted_text_delivery("display:1", page) for page in pages))
+        self.assertFalse(registry.trusted_text_delivery("unrelated", pages[0]))
+        metadata.activated = False
+        self.assertFalse(registry.trusted_text_delivery("display:1", pages[0]))
+
+    async def test_normal_display_retries_only_unsent_page_and_does_not_rerun_tool(self):
+        registry, display, _ = await self.native_display_registry()
+        outcomes = iter((True, False, True))
+        delivered = []
+        async def send(chain):
+            outcome = next(outcomes)
+            if outcome: delivered.append(chain.chain[0].text)
+            return outcome
+        registry.deliver = send
+        handler = registry._normal_handler("show_xianyu_baseline")
+        first = json.loads(await handler(self.event))
+        self.assertEqual(first["code"], "delivery_failed")
+        self.assertFalse(first["complete"])
+        second = json.loads(await handler(self.event))
+        self.assertTrue(second["complete"] and second["text_delivered"])
+        self.assertEqual(second["delivered_count"], 2)
+        self.assertEqual(display.calls, 1)
+        self.assertEqual(len(delivered), 2)
+
+    async def test_normal_complete_display_handoff_preserves_proven_progress_without_resend(self):
+        registry, display, _ = await self.native_display_registry()
+        result = json.loads(await registry._normal_handler("show_xianyu_baseline")(self.event))
+        self.assertTrue(result["complete"])
+        worker = await registry.execute_codex("show_xianyu_baseline", {}, "worker-display")
+        self.assertTrue(worker["complete"] and worker["text_delivered"])
+        self.assertEqual(worker["delivery_plan"]["chunk_count"], 2)
+        self.assertEqual(registry.trusted_text_progress("worker-display", worker),
+                         {"delivered_chunks": 2, "remaining_chunks": 0, "complete": True})
+        self.assertEqual(registry.codex_deliveries("worker-display"), [])
+        self.assertEqual(display.calls, 1)
+        self.assertEqual(len(self.event.sent), 2)
+
+    async def test_normal_partial_display_handoff_transfers_only_unconfirmed_page(self):
+        registry, display, _ = await self.native_display_registry()
+        outcomes = iter((True, False))
+        registry.deliver = AsyncMock(side_effect=lambda chain: next(outcomes))
+        handler = registry._normal_handler("show_xianyu_baseline")
+        first = json.loads(await handler(self.event))
+        self.assertEqual(first["code"], "delivery_failed")
+        worker = await registry.execute_codex("show_xianyu_baseline", {}, "worker-display")
+        self.assertEqual(registry.trusted_text_progress("worker-display", worker),
+                         {"delivered_chunks": 1, "remaining_chunks": 1, "complete": False})
+        self.assertEqual(worker["delivery_plan"]["chunk_count"], 2)
+        pages = registry.codex_deliveries("worker-display")
+        self.assertEqual(len(pages), 1)
+        self.assertIn("2. [Synthetic item]", pages[0].chain[0].text)
+        self.assertTrue(registry.trusted_text_delivery("worker-display", pages[0]))
+        self.assertEqual(json.loads(await handler(self.event))["code"], "delivery_transferred")
+        self.assertEqual(registry.deliver.await_count, 2)
+        self.assertEqual(display.calls, 1)
+
+    async def test_uncertain_normal_display_is_never_replayed_during_handoff(self):
+        for empty_receipt in (False, True):
+            with self.subTest(empty_receipt=empty_receipt):
+                registry, display, _ = await self.native_display_registry()
+                async def uncertain(chain):
+                    if empty_receipt:
+                        chain.qqofficial_sent_message_ids = []
+                        return None
+                    raise RuntimeError("synthetic uncertain send")
+                registry.deliver = AsyncMock(side_effect=uncertain)
+                first = json.loads(await registry._normal_handler("show_xianyu_baseline")(self.event))
+                self.assertEqual(first["code"], "delivery_uncertain")
+                worker = await registry.execute_codex("show_xianyu_baseline", {}, "worker-display")
+                self.assertFalse(worker["ok"])
+                self.assertEqual(worker["code"], "delivery_uncertain")
+                self.assertEqual(registry.codex_deliveries("worker-display"), [])
+                self.assertIsNone(registry.trusted_text_progress("worker-display", worker))
+                self.assertEqual(display.calls, 1)
+                self.assertEqual(registry.deliver.await_count, 1)
+
+    async def test_handoff_waits_for_inflight_normal_sender(self):
+        registry, display, _ = await self.native_display_registry()
+        sending, release = asyncio.Event(), asyncio.Event()
+        async def send(chain):
+            sending.set()
+            await release.wait()
+            return True
+        registry.deliver = AsyncMock(side_effect=send)
+        normal = asyncio.create_task(registry._normal_handler("show_xianyu_baseline")(self.event))
+        await asyncio.wait_for(sending.wait(), 1)
+        worker = asyncio.create_task(registry.execute_codex("show_xianyu_baseline", {}, "worker-display"))
+        await asyncio.sleep(0)
+        self.assertFalse(worker.done())
+        self.assertEqual(registry.deliver.await_count, 1)
+        release.set()
+        first, result = await asyncio.wait_for(asyncio.gather(normal, worker), 1)
+        self.assertTrue(json.loads(first)["complete"] and result["complete"])
+        self.assertEqual(registry.codex_deliveries("worker-display"), [])
+        self.assertEqual(registry.deliver.await_count, 2)
+        self.assertEqual(display.calls, 1)
+
+    async def test_handoff_started_before_provider_finishes_waits_for_normal_delivery(self):
+        registry, display, _ = await self.native_display_registry()
+        producing, release = asyncio.Event(), asyncio.Event()
+        async def pause():
+            producing.set()
+            await release.wait()
+        display.before_return = pause
+        normal = asyncio.create_task(registry._normal_handler("show_xianyu_baseline")(self.event))
+        await asyncio.wait_for(producing.wait(), 1)
+        worker = asyncio.create_task(registry.execute_codex("show_xianyu_baseline", {}, "worker-display"))
+        await asyncio.sleep(0)
+        release.set()
+        first, result = await asyncio.wait_for(asyncio.gather(normal, worker), 1)
+        self.assertTrue(json.loads(first)["complete"] and result["complete"])
+        self.assertEqual(len(self.event.sent), 2)
+        self.assertEqual(registry.codex_deliveries("worker-display"), [])
+        self.assertEqual(display.calls, 1)
+
+    async def test_search_handoff_coalesces_native_text_display(self):
+        registry, display, _ = await self.native_display_registry()
+        result = json.loads(await registry._normal_handler("xianyu_search")(self.event, query="synthetic product"))
+        self.assertTrue(result["complete"])
+        worker = await registry.execute_codex("xianyu_search", {"query": "synthetic product"}, "worker-search")
+        self.assertTrue(worker["complete"])
+        self.assertEqual(registry.trusted_text_progress("worker-search", worker)["delivered_chunks"], 2)
+        self.assertEqual(registry.codex_deliveries("worker-search"), [])
+        self.assertEqual(len(self.event.sent), 2)
+        self.assertEqual(display.calls, 1)
+
+    async def test_text_progress_rejects_forgery_and_rechecks_authorization(self):
+        for revoke in (lambda display, metadata: setattr(display, "allowed", False),
+                       lambda display, metadata: setattr(metadata, "activated", False),
+                       lambda display, metadata: setattr(display, "watch_visible", False),
+                       lambda display, metadata: display.records.clear()):
+            registry, display, metadata = await self.native_display_registry()
+            await registry._normal_handler("show_xianyu_baseline")(self.event)
+            worker = await registry.execute_codex("show_xianyu_baseline", {}, "worker-display")
+            self.assertIsNotNone(registry.trusted_text_progress("worker-display", worker))
+            forged = copy.deepcopy(worker)
+            forged["delivery_progress"]["delivered_chunks"] = 1
+            self.assertIsNone(registry.trusted_text_progress("worker-display", forged))
+            revoke(display, metadata)
+            self.assertFalse(registry.text_delivery_allowed("show_xianyu_baseline", worker["delivery_plan"]))
+            self.assertIsNone(registry.trusted_text_progress("worker-display", worker))
+
     async def test_same_schema_and_handler_for_both_engine_adapters(self):
         registry = await capabilities.CapabilityRegistry(self.context, self.event).prepare()
         schema = registry.schemas()[0]["function"]

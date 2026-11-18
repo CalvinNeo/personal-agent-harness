@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -1541,7 +1542,8 @@ class Main(star.Star):
                         route["next_retry"] = now + min(300, 30 * 2 ** (route["attempts"] - 1))
                         self._save()
                         self.logger.warning("Codex result delivery retry id=%s attempt=%d", jid, route["attempts"])
-                elif not route.get("schedule_id") and int(route.get("progress_count", 0)) < 2:
+                elif (not route.get("schedule_id") and not route.get("native_text_started")
+                      and int(route.get("progress_count", 0)) < 2):
                     wait = 60 if int(route.get("progress_count", 0)) == 0 else 120
                     if now - float(route.get("last_progress", now)) >= wait:
                         # Progress is best effort and never consumes final retries.
@@ -1595,6 +1597,70 @@ class Main(star.Star):
         if wait:
             await asyncio.gather(*tasks)
 
+    async def _deliver_tool_text_plan(self, route, receipt, registry=None):
+        """Deliver complete native pages; replay only confirmed unsent pages.
+
+        A crash between sending and saving is deliberately uncertain. A known
+        rejection can be retried without duplicating already confirmed pages.
+        """
+        plan = receipt["text_plan"]
+        result = copy.deepcopy(plan["result"])
+        pages = plan["pages"]
+        offset = plan.get("confirmed_before", 0)
+        if plan.get("sending") is not None:
+            return {"ok": False, "code": "delivery_uncertain", "complete": False,
+                    "delivered_chunks": offset + plan.get("next", 0), "chunk_count": offset + len(pages),
+                    "error": "清单有一页发送结果未确认，未自动重复发送；不要声称清单已完整送达。"}
+        route["native_text_started"] = True
+        while plan.get("next", 0) < len(pages):
+            index = plan.get("next", 0)
+            chain = MessageChain([Plain(pages[index])], use_markdown_=True)
+            if hasattr(chain, "use_t2i_"):
+                chain.use_t2i_ = False
+            async with self._lock:
+                permitted = getattr(registry, "text_delivery_allowed", None)
+                if (not self._route_allowed(route) or route.get("schedule_id") and not self.schedules.permits(route)
+                        or callable(permitted) and not permitted(receipt.get("name"), result.get("delivery_plan", {}))):
+                    return {"ok": False, "code": "not_authorized", "complete": False,
+                            "error": "原会话授权已失效，清单停止发送。"}
+                plan["sending"] = index
+                self._save()
+                event = self._events.get(route["id"])
+                before = self._sent_ids(event) if event is not None else set()
+                try:
+                    outcome = await (event.send(chain) if event is not None else self.context.send_message(route["umo"], chain))
+                except Exception as error:
+                    # Transport exceptions can happen after QQ accepted a page.
+                    self.logger.warning("Native text delivery uncertain id=%s page=%d type=%s", route["id"], index, type(error).__name__)
+                    self._save()
+                    return {"ok": False, "code": "delivery_uncertain", "complete": False,
+                            "delivered_chunks": offset + index, "chunk_count": offset + len(pages),
+                            "error": "清单分页发送未确认成功；已确认页面不重复，不能声称完整送达。"}
+                if outcome is False:
+                    plan["sending"] = None
+                    self._save()
+                    return {"ok": False, "code": "text_delivery_failed", "complete": False,
+                            "delivered_chunks": offset + index, "chunk_count": offset + len(pages),
+                            "error": "QQ拒绝了清单的一页；本次未发完，可重试补发未送达页。"}
+                exact_ids = self._chain_ids(chain)
+                if exact_ids is not None and not exact_ids:
+                    self._save()
+                    return {"ok": False, "code": "delivery_uncertain", "complete": False,
+                            "delivered_chunks": offset + index, "chunk_count": offset + len(pages),
+                            "error": "QQ没有返回该清单页的消息回执，未确认完整送达。"}
+                # Receipt helpers save too: commit page progress before them.
+                plan["next"] = index + 1
+                plan["sending"] = None
+                if event is not None:
+                    self._remember_sent_ids(event, route["id"], before, chain)
+                else:
+                    self._remember_proactive_ids(route, chain)
+                self._save()
+        result.update(delivery_pending=False, text_delivered=True, complete=True,
+                      delivered_chunks=offset + len(pages), delivered_count=result.get("delivery_plan", {}).get("total_items", 0),
+                      delivery_progress={"delivered_chunks": offset + len(pages), "remaining_chunks": 0, "complete": True})
+        return result
+
     async def _execute_tool_call(self, route, registry, cid, name, arguments):
         receipts = route.setdefault("tool_receipts", {})
         mutations = MUTATING_TOOLS
@@ -1610,28 +1676,49 @@ class Main(star.Star):
         elif previous and previous.get("fingerprint") != fingerprint:
             result = {"ok": False, "code": "call_conflict", "error": "调用编号冲突，未执行。"}
         elif previous:
-            result = self._stored_tool_result(route, previous) if previous.get("state") == "complete" else {"ok": False, "code": "execution_uncertain", "error": "上次调用在执行中中断，未重复执行；请先核对操作结果。"}
+            if previous.get("text_plan"):
+                result = await self._deliver_tool_text_plan(route, previous, registry)
+                self._store_tool_result(route, cid, result)
+                self._save()
+            else:
+                result = self._stored_tool_result(route, previous) if previous.get("state") == "complete" else {"ok": False, "code": "execution_uncertain", "error": "上次调用在执行中中断，未重复执行；请先核对操作结果。"}
         elif inherited is not None:
-            result = (self._stored_tool_result(retry_source, inherited) if inherited.get("state") == "complete"
-                      else {"ok": False, "code": "execution_uncertain", "error": "原任务的这次修改执行结果不确定，未重复执行；请先核对实际结果。"})
             receipts[cid] = {"name": name, "fingerprint": fingerprint, "state": "started"}
+            if inherited.get("text_plan"):
+                receipts[cid]["text_plan"] = copy.deepcopy(inherited["text_plan"])
+                self._save()
+                result = await self._deliver_tool_text_plan(route, receipts[cid], registry)
+            else:
+                result = (self._stored_tool_result(retry_source, inherited) if inherited.get("state") == "complete"
+                          else {"ok": False, "code": "execution_uncertain", "error": "原任务的这次修改执行结果不确定，未重复执行；请先核对实际结果。"})
             self._store_tool_result(route, cid, result)
             self._save()
         else:
             duplicate = next((item for item in receipts.values() if name in mutations
                               and item.get("fingerprint") == fingerprint and item.get("state") == "complete"), None)
             if duplicate:
-                result = self._stored_tool_result(route, duplicate)
+                if duplicate.get("text_plan"):
+                    receipts[cid] = copy.deepcopy(duplicate)
+                    result = await self._deliver_tool_text_plan(route, receipts[cid], registry)
+                    self._store_tool_result(route, cid, result)
+                    self._save()
+                else:
+                    result = self._stored_tool_result(route, duplicate)
             elif len(receipts) >= 32:
                 result = {"ok": False, "code": "call_limit", "error": "本次工具调用次数已达上限。"}
             else:
                 receipts[cid] = {"name": name, "fingerprint": fingerprint, "state": "started"}
                 self._save()
                 result = await registry.execute_codex(name, arguments, cid)
-                # Command adapters return text to the model. Native media
-                # (e.g. a requested login QR) uses the original QQ bridge.
+                # Only locally trusted display tools may deliver text directly.
+                # Other tools still return prose to the model; media stays native.
                 deliveries = getattr(registry, "codex_deliveries", registry.drain_deliveries)
+                text_pages = []
                 for chain in deliveries(cid):
+                    trusted = getattr(registry, "trusted_text_delivery", None)
+                    if callable(trusted) and trusted(cid, chain):
+                        text_pages.append("".join(part.text for part in chain.chain))
+                        continue
                     if not any(type(part).__name__ in {"Image", "File", "Record"} for part in getattr(chain, "chain", [])):
                         continue
                     async with self._lock:
@@ -1643,6 +1730,18 @@ class Main(star.Star):
                         result = {"ok": False, "code": "media_delivery_failed", "error": "工具已执行，但QQ媒体发送失败，未确认送达。"}
                     elif isinstance(result, dict):
                         result.update(delivery_pending=False, media_delivered=True)
+                get_progress = getattr(registry, "trusted_text_progress", None)
+                progress = get_progress(cid, result) if callable(get_progress) else None
+                confirmed = progress["delivered_chunks"] if progress else 0
+                if ((text_pages or progress and progress.get("complete")) and isinstance(result, dict) and result.get("ok") is True
+                        and result.get("delivery_plan", {}).get("chunk_count") == confirmed + len(text_pages)):
+                    receipts[cid]["text_plan"] = {"pages": text_pages, "next": 0, "sending": None,
+                                                  "confirmed_before": confirmed, "result": copy.deepcopy(result)}
+                    self._save()
+                    result = await self._deliver_tool_text_plan(route, receipts[cid], registry)
+                elif isinstance(result, dict) and result.get("delivery_plan") and result.get("ok"):
+                    result = {"ok": False, "code": "display_missing", "complete": False,
+                              "error": "清单工具没有提供通过校验的原生页面，未发送完整清单。"}
                 recipient = registry.recipient.metadata() if registry.recipient is not None else None
                 if recipient is not None:
                     route["recipient"] = recipient

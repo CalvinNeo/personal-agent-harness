@@ -23,7 +23,8 @@ _EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,100}$")
 _MUTATIONS = frozenset({"manage_long_term_memory", "create_current_reminder", "create_schedule_reminders",
                         "cancel_current_reminder", "xhs_login", "xhs_logout", "set_current_reply_recipient",
-                        "create_scheduled_task", "xianyu_login", "create_xianyu_watch", "manage_xianyu_watch"})
+                        "create_scheduled_task", "xianyu_login", "create_xianyu_watch", "manage_xianyu_watch", "show_xianyu_baseline", "xianyu_search"})
+_TEXT_DELIVERY_TOOLS = frozenset({"show_xianyu_baseline", "xianyu_search"})
 CODEX_INSTRUCTION = (
     "\n[Codex工具执行策略] 你负责理解用户意图并选择当前任务需要的工具。"
     "服务端验证调用来自本任务后，不再按当前消息的关键词重复判断是否允许使用工具；无需让用户补固定句式。"
@@ -38,6 +39,7 @@ CODEX_INSTRUCTION = (
     "用户要求闲鱼登录或咸鱼登录时，在已授权群聊或私聊使用xianyu_login；已扫码、查状态或有效期使用xianyu_login_status。二维码由QQ桥接器回传，不要回复没有入口；登录态是否有效必须查真实状态，不能承诺固定天数。"
     "即时查询闲鱼商品使用xianyu_search；群内已授权成员均可用xianyu_login_status只读检查共享登录，扫码与浏览器授权完成是不同状态。"
     "闲鱼新商品监控使用create_xianyu_watch，由你构造1至5个具体搜索词组，默认每30分钟；提醒绑定当前会话。必须登录；返回awaiting_login表示仅保存待登录草案，不能声称监控已启动。首次只建立基线，后续按商品ID去重，仅提醒商品名称、价格和链接。用户给价格上限时必须在create或manage工具中实际保存max_price（严格低于上限），只能按回执中的条件确认；不能只在文字中承诺筛选。已授权成员共享监控查询与管理；用list_xianyu_watches定位现有监控，再用read_xianyu_watch分页读取真实基线和去重状态。返回数量不代表只保存数量；旧基线明细缺失时区分原ID与后来补查元数据，不能用新搜索冒充原快照。不要用create_scheduled_task代替专用闲鱼监控。"
+    "用户要求当前基线、基线有哪些、那40件列表或完整商品清单时，必须调用show_xianyu_baseline，默认matching_only=true展示全部已知符合条件的商品；不能仅回答数字或让用户再次要求展开。新建或更新监控后要求基线也要调用该工具。商品名称使用真实链接超链接，不能只给链接模板。delivery_pending只表示排队；text_delivered=true且complete=true才可确认清单已发，不重复改写已投递清单。缺失详情的商品不包含在已知符合条件数里。用户要求修改频率时必须调用manage_xianyu_watch action=update保存interval_minutes，按真实回执确认，不能读完状态就声称已修改。"
     "只有持久化成功才说已设置，并说明编号、首次执行时间和频率；list_scheduled_tasks查询，"
     "manage_scheduled_task暂停/恢复/取消。不要用shell sleep或常驻循环代替定时工具。"
     "小红书xhs_read_notes返回source中的脱敏原始详情（包括上游实际提供的视频流、字幕和其他字段），"
@@ -141,6 +143,11 @@ class CapabilityRegistry:
         self.event = event if task_text == self._text else restore_event(self.snapshot)
         self._tools, self._providers, self._calls, self._deliveries = {}, {}, {}, {}
         self._mutation_calls = {}
+        self._call_names, self._normal_pending = {}, {}
+        self._normal_text_counts = {}
+        self._normal_uncertain = set()
+        self._normal_active, self._text_progress = {}, {}
+        self._normal_transferred = set()
         self._call_engines = {}
         self._xhs_results, self._xhs_delivered = {}, set()
         self._lock = asyncio.Lock()
@@ -446,11 +453,41 @@ class CapabilityRegistry:
                 if name in _MUTATIONS:
                     self._mutation_calls[fingerprint] = task
                 self._calls[call_id] = (fingerprint, task)
+                self._call_names[call_id] = name
         return await asyncio.shield(task)
 
     async def _handoff(self, previous, tool, arguments, *, codex):
         result = await asyncio.shield(previous)
-        if not codex or not isinstance(result, dict) or result.get("code") != "intent_required":
+        normal_call = next((cid for cid, (_, task) in self._calls.items()
+                            if task is previous and cid in self._normal_active), None)
+        if codex and tool['name'] in _TEXT_DELIVERY_TOOLS and normal_call is not None:
+            while (active := self._normal_active.get(normal_call)) is not None and not active.is_set():
+                await active.wait()
+            result = copy.deepcopy(previous.result())
+            plan = result.get('delivery_plan') if isinstance(result, dict) else None
+            if not self.text_delivery_allowed(tool['name'], plan):
+                return {'ok': False, 'code': 'not_authorized', 'complete': False}
+            progress = self._normal_progress(normal_call, result)
+            if normal_call in self._normal_uncertain:
+                return {**result, 'ok': False, 'code': 'delivery_uncertain', 'complete': False,
+                        'delivery_progress': progress,
+                        'error': '上一页发送结果未确认，交接未重复发送；不能声称清单已完整送达。'}
+            pending = self._normal_pending.get(normal_call)
+            if pending is None:
+                pending = self.drain_deliveries(normal_call)
+            text_remaining = sum(self.trusted_text_delivery(normal_call, chain) for chain in pending)
+            if progress['delivered_chunks'] + text_remaining != plan['chunk_count']:
+                return {'ok': False, 'code': 'display_missing', 'complete': False}
+            self._normal_pending[normal_call] = []
+            self._normal_transferred.add(normal_call)
+            current = asyncio.current_task()
+            if pending:
+                self._deliveries.setdefault(current, []).extend(pending)
+            result.update(delivery_progress=progress, delivery_pending=not progress['complete'],
+                          complete=progress['complete'], text_delivered=progress['complete'])
+            self._text_progress[current] = {'plan': copy.deepcopy(plan), 'progress': copy.deepcopy(progress)}
+            return result
+        if not codex or not isinstance(result, dict) or result.get('code') != 'intent_required':
             deliveries = self._deliveries.pop(previous, [])
             if deliveries:
                 self._deliveries.setdefault(asyncio.current_task(), []).extend(deliveries)
@@ -468,16 +505,19 @@ class CapabilityRegistry:
                 return {"ok": False, "code": "not_authorized", "error": "当前会话的工具授权已失效。"}
         active = True
         caller = asyncio.current_task()
+        deliveries = []
+        invocation_event = (_CaptureEvent(self.event, deliveries)
+                            if provider == "xianyu_watch" and tool["name"] == "show_xianyu_baseline" else self.event)
 
         def authorized(event, name):
-            return bool(active and codex and event is self.event and name == tool["name"]
+            return bool(active and codex and event is invocation_event and name == tool["name"]
                         and asyncio.current_task() is caller and self._valid())
 
         try:
             keywords = copy.deepcopy(arguments)
             if codex and "_codex_call" in inspect.signature(tool["handler"]).parameters:
                 keywords["_codex_call"] = authorized
-            result = tool["handler"](self.event, **keywords)
+            result = tool["handler"](invocation_event, **keywords)
             if inspect.isawaitable(result):
                 result = await result
             if isinstance(result, str):
@@ -496,6 +536,60 @@ class CapabilityRegistry:
             return {"ok": False, "code": "tool_failed", "error": "工具执行失败，未确认成功；请根据返回结果重试。"}
         finally:
             active = False
+            if isinstance(invocation_event, _CaptureEvent):
+                invocation_event._deliveries = None
+            if deliveries:
+                self._deliveries.setdefault(caller, []).extend(deliveries)
+
+    def text_delivery_allowed(self, name, plan):
+        """Recheck provider, actor and source watch authorization for every page."""
+        tool = self._tools.get(name)
+        provider = self._providers.get('xianyu_watch')
+        if not (self._valid() and name in _TEXT_DELIVERY_TOOLS and tool
+                and tool.get('provider') == 'xianyu_watch' and provider
+                and getattr(provider[0], 'activated', True) and provider[1]._allowed(self.event)
+                and isinstance(plan, dict) and plan.get('version') == 1 and plan.get('tool') == name
+                and re.fullmatch(r'[a-f0-9]{64}', str(plan.get('plan_id', '')))
+                and type(plan.get('chunk_count')) is int and 1 <= plan['chunk_count'] <= 10000
+                and type(plan.get('total_items')) is int and 0 <= plan['total_items'] <= 10000):
+            return False
+        if name == 'show_xianyu_baseline':
+            watch_id = plan.get('watch_id')
+            plugin = provider[1]
+            visible = getattr(plugin, '_watch_visible', None)
+            return bool(isinstance(watch_id, str) and re.fullmatch(r'[a-f0-9]{16}', watch_id)
+                        and callable(visible) and visible(self.event, getattr(plugin, 'records', {}).get(watch_id)))
+        return True
+
+    def trusted_text_delivery(self, call_id, chain):
+        """Only locally generated Xianyu displays may bypass model prose."""
+        name = self._call_names.get(call_id)
+        previous = self._calls.get(call_id)
+        try:
+            result = previous[1].result() if previous and previous[1].done() and not previous[1].cancelled() else None
+        except Exception:
+            return False
+        plan = result.get('delivery_plan') if isinstance(result, dict) else None
+        parts = getattr(chain, 'chain', [])
+        return bool(self.text_delivery_allowed(name, plan) and getattr(chain, 'use_markdown_', None) is True and parts
+                    and all(type(part).__name__ == 'Plain' and isinstance(getattr(part, 'text', None), str) for part in parts)
+                    and 0 < len(''.join(part.text for part in parts).encode()) <= 3500)
+
+    def _normal_progress(self, call_id, result):
+        total = result.get('delivery_plan', {}).get('chunk_count', 0)
+        delivered = self._normal_text_counts.get(call_id, 0)
+        return {'delivered_chunks': delivered, 'remaining_chunks': max(0, total - delivered),
+                'complete': type(total) is int and total > 0 and delivered == total}
+
+    def trusted_text_progress(self, call_id, result):
+        """Return only progress proven by this registry's normal-path sender."""
+        previous = self._calls.get(call_id)
+        proof = self._text_progress.get(previous[1]) if previous else None
+        if (not isinstance(result, dict) or not proof or result.get('delivery_plan') != proof['plan']
+                or result.get('delivery_progress') != proof['progress']
+                or not self.text_delivery_allowed(self._call_names.get(call_id), proof['plan'])):
+            return None
+        return copy.deepcopy(proof['progress'])
 
     def drain_deliveries(self, call_id):
         previous = self._calls.get(call_id)
@@ -510,7 +604,7 @@ class CapabilityRegistry:
         self._xhs_results[task] = {"binding": copy.deepcopy(binding), "items": list(verified["items"][:4]), "codex": codex}
 
     def codex_deliveries(self, call_id):
-        """Return original verified XHS images only for the trusted QQ broker."""
+        """Return captured native output and verified images to the QQ broker."""
         chains = self.drain_deliveries(call_id)
         previous = self._calls.get(call_id)
         verified = self._xhs_results.pop(previous[1], None) if previous else None
@@ -554,26 +648,73 @@ class CapabilityRegistry:
     def _normal_handler(self, name):
         async def handler(event, **arguments):
             if identity(event) != self._identity:
-                return json.dumps({"ok": False, "code": "not_authorized"})
+                return json.dumps({'ok': False, 'code': 'not_authorized'})
             digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
-            call_id = "normal:" + name + ":" + digest
-            result = copy.deepcopy(await self.execute(name, arguments, call_id))
-            for chain in self.drain_deliveries(call_id):
-                if not any(type(part).__name__ in {"Image", "Record", "File", "Video"} for part in getattr(chain, "chain", [])):
-                    continue
-                sender = self.deliver or self.original.send
-                try:
-                    outcome = await sender(chain)
-                    if outcome is False:
-                        raise RuntimeError("media delivery rejected")
-                except Exception:
-                    return json.dumps({"ok": False, "code": "delivery_failed", "error": "工具已返回媒体，但QQ未确认送达；不要声称已经发送。"}, ensure_ascii=False)
+            call_id = 'normal:' + name + ':' + digest
+            while (active := self._normal_active.get(call_id)) is not None and not active.is_set():
+                await active.wait()
+            if call_id in self._normal_transferred:
+                return json.dumps({'ok': False, 'code': 'delivery_transferred', 'complete': False,
+                                   'error': '该清单投递已交接给Codex，普通路径未重复发送。'}, ensure_ascii=False)
+            active = asyncio.Event()
+            self._normal_active[call_id] = active
+            try:
+                shared = await self.execute(name, arguments, call_id)
+                result = copy.deepcopy(shared)
+                plan = result.get('delivery_plan') if isinstance(result, dict) else None
+                if plan is not None and not self.text_delivery_allowed(name, plan):
+                    return json.dumps({'ok': False, 'code': 'not_authorized', 'complete': False})
+                if call_id in self._normal_uncertain:
+                    return json.dumps({**result, 'ok': False, 'code': 'delivery_uncertain', 'complete': False,
+                                       'delivery_progress': self._normal_progress(call_id, result),
+                                       'error': '上一页发送结果未确认，未重复发送；不能声称清单已完整送达。'}, ensure_ascii=False)
+                if call_id not in self._normal_pending:
+                    self._normal_pending[call_id] = self.drain_deliveries(call_id)
+                pending = self._normal_pending[call_id]
+                while pending:
+                    chain = pending[0]
+                    text_delivery = self.trusted_text_delivery(call_id, chain)
+                    if not text_delivery and not any(type(part).__name__ in {'Image', 'Record', 'File', 'Video'} for part in getattr(chain, 'chain', [])):
+                        pending.pop(0)
+                        continue
+                    sender = self.deliver or self.original.send
+                    try:
+                        outcome = await sender(chain)
+                        if outcome is False:
+                            return json.dumps({**result, 'ok': False, 'code': 'delivery_failed', 'complete': False,
+                                               'delivery_progress': self._normal_progress(call_id, result),
+                                               'error': '工具结果未完整送达QQ；不要声称清单已发送完成。'}, ensure_ascii=False)
+                        if hasattr(chain, 'qqofficial_sent_message_ids') and not chain.qqofficial_sent_message_ids:
+                            raise RuntimeError('empty QQ delivery receipt')
+                    except BaseException as error:
+                        self._normal_uncertain.add(call_id)
+                        if isinstance(error, asyncio.CancelledError):
+                            raise
+                        return json.dumps({**result, 'ok': False, 'code': 'delivery_uncertain', 'complete': False,
+                                           'delivery_progress': self._normal_progress(call_id, result),
+                                           'error': '工具结果发送未确认；不要声称清单已发送完成。'}, ensure_ascii=False)
+                    pending.pop(0)
+                    if isinstance(result, dict):
+                        result['text_delivered' if text_delivery else 'media_delivered'] = True
+                        if text_delivery:
+                            self._normal_text_counts[call_id] = self._normal_text_counts.get(call_id, 0) + 1
+                            shared['delivery_progress'] = self._normal_progress(call_id, result)
                 if isinstance(result, dict):
-                    result["media_delivered"] = True
-            if isinstance(result, dict):
-                result["delivery_pending"] = False
-                if isinstance(result.get("_mcp_result"), dict):
-                    from mcp.types import CallToolResult
-                    return CallToolResult.model_validate(result["_mcp_result"])
-            return json.dumps(result, ensure_ascii=False)
+                    result['delivery_pending'] = False
+                    if plan is not None:
+                        progress = self._normal_progress(call_id, result)
+                        if not progress['complete']:
+                            return json.dumps({'ok': False, 'code': 'display_missing', 'complete': False,
+                                               'error': '完整清单页面未通过投递校验，不能声称已发完。'}, ensure_ascii=False)
+                        result.update(text_delivered=True, complete=True, delivery_progress=progress,
+                                      delivered_count=plan['total_items'])
+                        shared.update(result)
+                        task = self._calls[call_id][1]
+                        self._text_progress[task] = {'plan': copy.deepcopy(plan), 'progress': copy.deepcopy(progress)}
+                    if isinstance(result.get('_mcp_result'), dict):
+                        from mcp.types import CallToolResult
+                        return CallToolResult.model_validate(result['_mcp_result'])
+                return json.dumps(result, ensure_ascii=False)
+            finally:
+                active.set()
         return handler
