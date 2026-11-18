@@ -4,11 +4,12 @@ import json
 import tempfile
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins"))
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image as PILImage
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.core.agent.message import ImageURLPart, Message, dump_messages_with_checkpoints
 from astrbot.core.config import AstrBotConfig
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -19,11 +20,12 @@ from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.core.utils.image_input import prepare_request_images
 from image_context.main import Main, HasTopLevelImage
+from codex_bridge import media
 
 
-def event(text="", refs=(), sender="alice", group="test-group", addressed=True):
+def event(text="", refs=(), sender="alice", group="test-group", addressed=True, private=False):
     msg = AstrBotMessage()
-    msg.type = MessageType.GROUP_MESSAGE
+    msg.type = MessageType.FRIEND_MESSAGE if private else MessageType.GROUP_MESSAGE
     msg.message = [Plain(text)] + [Image.fromURL(ref) for ref in refs]
     msg.message_str = text
     msg.sender = MessageMember(sender)
@@ -87,8 +89,66 @@ async def main():
         await plugin.terminate()
         assert not plugin._cache._sessions
         handlers = [h for h in star_handlers_registry if h.handler_module_path == "image_context.main"]
-        assert len(handlers) == 2
+        assert len(handlers) == 3
         assert all(h.extras_configs["priority"] == 95 for h in handlers)
+        private = event(refs=refs[:1], group="private-alice", private=True)
+        plugin.allowed_umos.add(private.unified_msg_origin)
+        remember = next(handler for handler in handlers if handler.handler_name == "remember_images")
+        assert all(item.filter(private, {}) for item in remember.event_filters)
+        await plugin.remember_images(private)
+        follow = event("总结上一张图", group="private-alice", private=True)
+        private_request = ProviderRequest(prompt=follow.message_str)
+        await plugin.add_image_context(follow, private_request)
+        assert [part.image_url.url for part in private_request.extra_user_content_parts if isinstance(part, ImageURLPart)] == refs[:1]
+        assert not private.send.called and not follow.send.called
+        # Reproduce both production failures using real framework components.
+        missing = event("根据我发的上一张图，判断我站在哪里", group="receipt-group")
+        plugin.allowed_umos.add(missing.unified_msg_origin)
+        await plugin.add_image_context(missing, ProviderRequest(prompt=missing.message_str))
+        assert missing.is_stopped() and "原始图片消息" in str(missing.send.call_args)
+        quoted = event("看下上一张图", group="receipt-group")
+        quoted.message_obj.message.append(Reply(id="synthetic-original-id", chain=[]))
+        await plugin.add_image_context(quoted, ProviderRequest(prompt=quoted.message_str))
+        assert quoted.is_stopped() and "只传回了引用标识" in str(quoted.send.call_args)
+        direct = event("根据这张图，判断我站在哪里", refs=refs[:1], group="receipt-group")
+        direct.message_obj.message.append(Reply(id="older", chain=[Image.fromURL(refs[1])]))
+        direct_req = ProviderRequest(prompt=direct.message_str, image_urls=[refs[0], refs[1]])
+        await plugin.add_image_context(direct, direct_req)
+        assert not direct.is_stopped() and plugin.select_for_task(direct) == refs[:1]
+        assert not direct_req.image_urls
+        assert [part.image_url.url for part in direct_req.extra_user_content_parts if isinstance(part, ImageURLPart)] == refs[:1]
+        insufficient = event("分析这两张图", refs=refs[:1], group="receipt-group")
+        insufficient.message_obj.message.append(Reply(id="older", chain=[Image.fromURL(refs[1]), Image.fromURL(refs[2])]))
+        await plugin.add_image_context(insufficient, ProviderRequest(prompt=insufficient.message_str))
+        assert insufficient.is_stopped() and "不足" in str(insufficient.send.call_args)
+        # A clean restart preserves a real received upload in its original TTL.
+        saved = Path(folder) / "image-cache.json"
+        persistent = Main(None, {"allowed_umos": [direct.unified_msg_origin], "cache_file": str(saved)})
+        await persistent.remember_images(event(refs=refs[:1], group="receipt-group"))
+        await persistent.terminate()
+        restored = Main(None, {"allowed_umos": [direct.unified_msg_origin], "cache_file": str(saved)})
+        await restored.initialize()
+        assert restored.select_for_task(event("上一张图", group="receipt-group")) == refs[:1]
+        assert saved.stat().st_mode & 0o777 == 0o600
+        await restored.terminate()
+        # A quoted attachment with ‘看下’ must seed the following request,
+        # including after a restart, without merging an older upload batch.
+        quoted_source = event("看下", group="receipt-group")
+        quoted_source.message_obj.message.append(Reply(id="quoted-picture", chain=[Image.fromURL(refs[1])]))
+        await persistent.add_image_context(quoted_source, ProviderRequest(prompt="看下"))
+        assert persistent.select_for_task(event("刚才那几张图", group="receipt-group")) == refs[1:2]
+        restarted = Main(None, {"allowed_umos": [direct.unified_msg_origin], "cache_file": str(saved)})
+        await restarted.initialize()
+        assert restarted.select_for_task(event("根据我发的上一张图，判断我站在哪里", group="receipt-group")) == refs[1:2]
+        scoped_context = SimpleNamespace(get_all_stars=lambda: [SimpleNamespace(
+            name="image_context", activated=True, star_cls=restarted)])
+        # Run the real bridge selector and normalization, replacing only HTTP.
+        with patch.object(media, "_download", new=AsyncMock(return_value=picture.read_bytes())) as download:
+            images, quoted_text = await media.prepare_images(
+                event("根据我发的上一张图，判断我站在哪里", group="receipt-group"), scoped_context)
+        assert len(images) == 1 and not quoted_text
+        download.assert_awaited_once_with(refs[1])
+        await restarted.terminate()
         print("PASS image runtime: real imports/schema/registration/hooks, silent caching, isolation, 3-image preparation, temporary history, missing-image refusal, lifecycle")
 
 

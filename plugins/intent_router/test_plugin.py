@@ -87,11 +87,16 @@ def load_plugin():
         "astrbot.api": types.ModuleType("astrbot.api"),
         "astrbot.api.event": types.ModuleType("astrbot.api.event"),
         "astrbot.api.message_components": types.ModuleType("astrbot.api.message_components"),
+        "astrbot.core.pipeline.preprocess_stage.voice_input": types.ModuleType("astrbot.core.pipeline.preprocess_stage.voice_input"),
     }
     modules["astrbot.api"].star = star
     modules["astrbot.api.event"].AstrMessageEvent = object
     modules["astrbot.api.event"].filter = filters
     modules["astrbot.api.message_components"].Plain = FakePlain
+    modules["astrbot.core.pipeline.preprocess_stage.voice_input"].get_voice_input_text = (
+        lambda event: str(getattr(event, "message_str", "") or event.get_extra("voice_input_transcript") or "").strip()
+        if event.get_extra("voice_input_transcribed") else ""
+    )
     with patch.dict(sys.modules, modules):
         core_spec = importlib.util.spec_from_file_location(PACKAGE + ".core", ROOT / "core.py")
         core = importlib.util.module_from_spec(core_spec)

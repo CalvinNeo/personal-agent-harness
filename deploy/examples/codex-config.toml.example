@@ -49,4 +49,7 @@ network_proxy = true
 command = "/opt/astrbot/venv/bin/python"
 args = ["-I", "/opt/astrbot-codex-runner/public_web_mcp.py"]
 startup_timeout_sec = 20
-tool_timeout_sec = 40
+tool_timeout_sec = 300
+
+[mcp_servers.public_web.tools.download_douyin_media]
+approval_mode = "approve"

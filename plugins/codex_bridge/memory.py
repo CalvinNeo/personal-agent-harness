@@ -1,6 +1,50 @@
 """Read scoped memory through the trusted plugin, never through its database."""
 
 import hashlib
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+def memory_snapshot(context, event, logger):
+    """Read through the active plugin; the worker never receives database access."""
+    unavailable = {"status": "unavailable", "code": "plugin_unavailable",
+                   "observed_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(), "items": [], "total": None}
+    getter = getattr(context, "get_all_stars", None)
+    if not callable(getter):
+        return unavailable
+    try:
+        for metadata in getter():
+            if getattr(metadata, "name", None) != "long_term_memory" or not getattr(metadata, "activated", True):
+                continue
+            reader = getattr(getattr(metadata, "star_cls", None), "memory_snapshot_for_task", None)
+            if not callable(reader):
+                return unavailable
+            result = reader(event)
+            if not isinstance(result, dict) or result.get("status") not in {"ok", "unavailable"}:
+                raise ValueError("invalid memory snapshot")
+            return result
+    except Exception as error:
+        logger.warning("Codex memory snapshot unavailable type=%s", type(error).__name__)
+        unavailable["code"] = "read_failed"
+    return unavailable
+
+
+def saved_relationship_facts(context, event, logger):
+    """Only the active memory plugin can select this owner's stored facts."""
+    getter = getattr(context, "get_all_stars", None)
+    if not callable(getter):
+        return []
+    try:
+        for metadata in getter():
+            if getattr(metadata, "name", None) != "long_term_memory" or not getattr(metadata, "activated", True):
+                continue
+            reader = getattr(getattr(metadata, "star_cls", None), "saved_relationship_facts", None)
+            if callable(reader):
+                values = reader(event)
+                return [value for value in values[:100] if isinstance(value, str) and len(value) <= 1000] if isinstance(values, list) else []
+    except Exception as error:
+        logger.warning("QQ relationship memory unavailable type=%s", type(error).__name__)
+    return []
 
 
 def local_memory_request(context, event):

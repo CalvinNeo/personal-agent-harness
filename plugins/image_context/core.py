@@ -110,8 +110,35 @@ def _is_request_text(text: str) -> bool:
     return True
 
 
+_REFERENCE_ERROR_MESSAGES = {
+    "quote_missing": "QQ 这次只传回了引用标识，没有附上原始内容；我还没有拿到图片。请把图片和 @机器人 放在同一条消息里重新发送。",
+    "cache_missing": "当前未收到你在这个会话里可用的图片；请直接引用原始图片消息并 @我，或把图片和 @ 放在同一条消息重发。",
+    "count_mismatch": "你要求的图片数量超过了当前可用图片数量；请直接引用完整的原始图片消息并 @我，或把全部图片和 @ 放在同一条消息重发。",
+    "ambiguous": "这条请求中有多个图片引用，无法确定要处理哪几张；请明确数量，或直接引用要处理的原始图片消息并 @我。",
+    "denied": "当前会话或发送者无权读取图片上下文。",
+    "unavailable": "你引用的图片已不可用；请重新发送原图并 @我。",
+    "count_out_of_range": f"一次最多分析最近 {MAX_IMAGES} 张图片；请明确有效的图片数量，或重新发送要分析的图片并 @我。",
+}
+_GENERIC_REFERENCE_ERROR = "图片上下文暂时不可用，请重新附上原图。"
+
+
 class ImageReferenceError(ValueError):
-    pass
+    """A stable reason and safe message, independent of plugin import identity.
+
+    Never accept arbitrary exception text as a user-facing message. Other
+    plugins may read ``code`` across AstrBot's separately loaded modules, but
+    should map only their own supported codes to fixed messages.
+    """
+    def __init__(self, code: str, *, available: int | None = None, requested: int | None = None):
+        self.code = code if isinstance(code, str) and code in _REFERENCE_ERROR_MESSAGES else "unknown"
+        self.user_message = _REFERENCE_ERROR_MESSAGES.get(self.code, _GENERIC_REFERENCE_ERROR)
+        if (self.code == "count_mismatch" and type(available) is int and type(requested) is int
+                and 0 <= available <= MAX_IMAGES and 1 <= requested <= MAX_IMAGES):
+            self.user_message = (
+                f"当前只有 {available} 张可用图片，不足你要求的 {requested} 张；"
+                "请直接引用完整的原始图片消息并 @我，或把全部图片和 @ 放在同一条消息重发。"
+            )
+        super().__init__(self.user_message)
 
 
 @dataclass(frozen=True)
@@ -162,7 +189,7 @@ def parse_reference(text: str, *, allow_implicit: bool = False) -> ImageSelectio
             return ImageSelection()
         return None
     if len(matches) > 1:
-        raise ImageReferenceError("请明确要看最近几张图片，例如“分析刚才三张图”，或直接重新发送要分析的图片。")
+        raise ImageReferenceError("ambiguous")
     match = matches[0]
     prefix = text[:match.start()].rstrip()
     # Requests to create an image do not refer to cached uploads. References
@@ -179,7 +206,7 @@ def parse_reference(text: str, *, allow_implicit: bool = False) -> ImageSelectio
             return ImageSelection()
         number = int(count) if count.isascii() and count.isdigit() else _NUMBERS[count]
         if not 1 <= number <= MAX_IMAGES:
-            raise ImageReferenceError(f"一次最多分析最近 {MAX_IMAGES} 张图片，请缩小范围或重新发送。")
+            raise ImageReferenceError("count_out_of_range")
         return ImageSelection(number)
     if re.fullmatch(rf"(?:上|前)(?:一|1)张{_IMAGE_NOUN}", match[0]):
         return ImageSelection(1)
@@ -197,7 +224,7 @@ def parse_reference(text: str, *, allow_implicit: bool = False) -> ImageSelectio
         return ImageSelection()
     number = int(count) if count.isascii() and count.isdigit() else _NUMBERS[count]
     if not 1 <= number <= MAX_IMAGES:
-        raise ImageReferenceError(f"一次最多分析最近 {MAX_IMAGES} 张图片，请缩小范围或重新发送。")
+        raise ImageReferenceError("count_out_of_range")
     return ImageSelection(number)
 
 
@@ -280,13 +307,15 @@ class ImageCache:
             else:
                 del self._sessions[key]
 
-    def remember(self, key: tuple[str, str], refs: list[str], now: float, *, wall_now: float | None = None):
+    def remember(self, key: tuple[str, str], refs: list[str], now: float, *,
+                 wall_now: float | None = None, new_batch: bool = False):
+        """Remember received inputs; explicit reply scopes can own a new batch."""
         self.prune(now)
         refs = list(dict.fromkeys(ref for ref in refs if is_safe_image_ref(ref, self.local_root)))[:MAX_IMAGES]
         if not refs:
             return
         entries = self._sessions.get(key, [])
-        if entries and now - entries[-1].received_at <= BATCH_GAP_SECONDS:
+        if not new_batch and entries and now - entries[-1].received_at <= BATCH_GAP_SECONDS:
             batch_id = entries[-1].batch_id
         else:
             self._batch_id += 1
@@ -397,16 +426,16 @@ class ImageCache:
         self.prune(now)
         entries = self._sessions.get(key, [])
         if not entries:
-            raise ImageReferenceError("我没有收到你在本群最近 30 分钟内可用的图片。请重新发送图片并 @我，再告诉我要分析什么。")
+            raise ImageReferenceError("cache_missing")
         self._sessions.move_to_end(key)
         if selection.count is not None:
             if len(entries) < selection.count:
-                raise ImageReferenceError(f"我这里只找到你在本群最近 30 分钟发来的 {len(entries)} 张图片，不足 {selection.count} 张。请重新发送要分析的图片并 @我。")
+                raise ImageReferenceError("count_mismatch", available=len(entries), requested=selection.count)
             entries = entries[-selection.count:]
         else:
             entries = [entry for entry in entries if entry.batch_id == entries[-1].batch_id]
         if any(not is_safe_image_ref(entry.ref, self.local_root) for entry in entries):
-            raise ImageReferenceError("你引用的图片文件已不可用，请重新发送需要分析的图片并 @我。")
+            raise ImageReferenceError("unavailable")
         return [entry.ref for entry in entries]
 
 

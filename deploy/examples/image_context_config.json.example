@@ -1,5 +1,6 @@
 {
   "allowed_umos": [],
   "allowed_senders": [],
-  "cache_file": "/var/lib/astrbot/data/plugins/image_context/image_cache.json"
+  "cache_file": "/var/lib/astrbot/data/plugins/image_context/image_cache.json",
+  "archive_dir": "/var/lib/astrbot/data/plugins/image_context/image_archive"
 }

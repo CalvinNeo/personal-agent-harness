@@ -12,7 +12,11 @@ from pathlib import Path
 RETENTION = 7 * 86400
 MAX_CONVERSATIONS = 100
 MAX_BYTES = 64 * 1024 * 1024
-MAX_TOTAL_BYTES = 512 * 1024 * 1024
+# Durable Codex state stays bounded separately from disposable video/frame files.
+# The downloader permits 128 MiB per task; scratch also needs room for frames.
+MAX_SCRATCH_BYTES = 256 * 1024 * 1024
+MAX_CONVERSATION_BYTES = MAX_BYTES + MAX_SCRATCH_BYTES
+MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FILES = 4096
 THREAD_RE = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 
@@ -92,9 +96,9 @@ def remove_tree(path: Path) -> None:
     path.rmdir()
 
 
-def disk_size(path: Path, *, limit=None) -> int:
+def disk_size(path: Path, *, limit=None, scratch_limit=None, retained_limit=None) -> int:
     limit = MAX_BYTES if limit is None else limit
-    total = count = 0
+    total = count = retained = scratch = 0
     # os.walk's default onerror=None silently skips chmod-000 directories.
     # Every failed open/stat/scan must fail validation. Count all entries,
     # including directories and links, and stream the scan to stop at the
@@ -121,6 +125,14 @@ def disk_size(path: Path, *, limit=None) -> int:
                             if not stat.S_ISREG(info.st_mode):
                                 raise ValueError("conversation storage contains unsupported file")
                             total += info.st_size
+                            if parts[:2] == ("workspace", ".tmp"):
+                                scratch += info.st_size
+                                if scratch_limit is not None and scratch > scratch_limit:
+                                    raise ValueError("conversation scratch storage limit exceeded")
+                            else:
+                                retained += info.st_size
+                                if retained_limit is not None and retained > retained_limit:
+                                    raise ValueError("conversation retained storage limit exceeded")
                             if total > limit:
                                 raise ValueError("conversation storage limit exceeded")
                 finally:
@@ -130,6 +142,12 @@ def disk_size(path: Path, *, limit=None) -> int:
     except OSError as exc:
         raise ValueError("conversation storage cannot be traversed or inspected") from exc
     return total
+
+
+def conversation_size(path: Path) -> int:
+    """Validate all files while giving transient media its own bounded quota."""
+    return disk_size(path, limit=MAX_CONVERSATION_BYTES,
+                     scratch_limit=MAX_SCRATCH_BYTES, retained_limit=MAX_BYTES)
 
 
 class Conversations:
@@ -198,7 +216,7 @@ class Conversations:
         if not active and time.time() - item["updated"] > RETENTION:
             raise ValueError("conversation_expired: retained Codex session expired")
         private_dir(self.root(item))
-        disk_size(self.root(item))
+        conversation_size(self.root(item))
         return item
 
     def touch(self, item: dict):
@@ -280,16 +298,16 @@ class Conversations:
         for item in retained:
             if item["id"] in active:
                 try:
-                    total += disk_size(self.root(item))
+                    total += conversation_size(self.root(item))
                 except (OSError, ValueError):
                     # The live worker's storage watchdog stops oversized jobs;
                     # retention must not delete files underneath that process.
-                    total += MAX_BYTES
+                    total += MAX_CONVERSATION_BYTES
         for index, item in enumerate(retained):
             if item["id"] in active:
                 continue
             try:
-                size = disk_size(self.root(item))
+                size = conversation_size(self.root(item))
             except (OSError, ValueError):
                 self.retire(item, "conversation storage limit or filesystem validation failed")
                 continue

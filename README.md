@@ -1,6 +1,6 @@
 # Personal Agent Harness
 
-基于 AstrBot 的私人 QQ 智能体定制集合：官方 QQ 接入、自定义兼容模型、公开网页检索、隔离 Codex 任务、SQLite 长期记忆、日程提醒、跨消息图片、小红书原帖图文总结，以及地图与票务筛选。
+基于 AstrBot 的私人 QQ 智能体定制集合：官方 QQ 接入、自定义兼容模型、公开网页检索、隔离 Codex 任务、SQLite 长期记忆、日程提醒、跨消息图片、小红书原帖图文总结、闲鱼商品监控、语音输入，以及地图与票务筛选。
 
 本仓库保存全部可复用源码、补丁、行为默认值、测试和部署文档。可公开的模型选择与参数保留；部署地址、QQ 身份、私人提供商地址、密钥、聊天记录和运行数据不在仓库中。初始化仍关闭 QQ 和主模型、拒绝所有会话；需在服务器本地填写凭据并明确放行。默认值和私有配置的界线见 [DEFAULTS](docs/DEFAULTS.md)。
 
@@ -9,9 +9,11 @@
 | 内容 | 目录 | 关键行为 |
 | --- | --- | --- |
 | QQ → Codex 桥接 | `plugins/codex_bridge/` | 显式 `/codex`、自然语言和复杂任务路由、群/发送者白名单、写权限单独授权、持久状态看板 |
+| 定时执行任务 | `plugins/codex_bridge/schedules.py` | 一次性／间隔／每日／每周持久化调度，Codex 到点重新执行，结果回原会话，可查询／暂停／恢复／取消 |
 | 独立任务执行和模型代理 | `services/` | Unix socket 调用方 UID 检查、专用账号、Codex 沙箱、任务超时、真实模型密钥只由代理持有 |
-| Codex 会话续接 | `services/conversations.py`、`plugins/codex_bridge/` | 引用已发送的 Codex 回复可续接同一个原生 session，并保留原图；失败时不会静默新建会话 |
+| Codex 会话续接 | `services/conversations.py`、`plugins/codex_bridge/` | 已授权群与私聊共享会话及结果，跨成员引用保留原生 session 和原图；工具使用当前提问者身份 |
 | Codex 公开网页工具 | `services/public_web.py`、`services/public_web_mcp.py` | stdio MCP 搜索及 GET 读取公开网页，校验 DNS 与跳转；另已开放任务命令联网 |
+| 抖音公开视频 | `services/douyin.py`、`services/douyin_browser.py`、`services/douyin_egress.py` | 独立匿名浏览器返回原始详情和媒体资源，由 Codex 自主下载、抽帧分析 |
 | 长期记忆 | `plugins/long_term_memory/` | 授权群／私聊增删改查、尾句授权、SQLite 持久化、按会话和发送者隔离；优先于 Codex，不创建 Markdown 记忆文件 |
 | 自然语言提醒 | `plugins/reminder/` | 秒／分钟提醒、文字／图片日程、多条提醒、提前量、连续调整、原子持久化、真正 `@`、列表／取消 |
 | 轻量意图路由 | `plugins/intent_router/` | MiniMax Flash low、2 秒预算；超时只读转 Codex，本地专用功能与退出规则优先 |
@@ -61,7 +63,7 @@
 5. 将 `plugins/` 下的子目录复制到 `/var/lib/astrbot/data/plugins/`；将对应 `deploy/examples/*_config.json.example` 复制到 `/var/lib/astrbot/data/config/` 并去掉 `.example`。属主 `astrbot:astrbot`，目录 `0700`，配置 `0600`。复制 `services/*.py` 到 `/opt/astrbot-codex-runner/`，由 root 管理；持久 Codex runner 还需要 root 管理的 `codex-bwrap` 隔离启动器，路径由 `HARNESS_BWRAP` 指定。
    `intent_router_config.json.example` 默认 `light`、2 秒，规划器默认 MiniMax M3.1 Flash、`reasoning_effort=low`、`max_tokens=512`。分别配置规划 provider 和 `$MINIMAX_API_KEY`；无配置时代码仍保守使用 `regex`。超时经既有桥接只读转 Codex，本地记忆／提醒／图文／出行优先；各执行插件仍做最终校验。
 6. 在服务器本地复制并填写 `deploy/examples/` 中的环境文件。`model.env` 放 `/etc/astrbot/`、`root:astrbot 0640`；`runner.env` 和 `proxy.env` 为 root 管理的 `0600` 文件。真实代理 API key 单独存 `/var/lib/codexproxy/upstream-token`，`root:codexproxy 0640`。不要把密钥作为命令行参数或发到 Git。
-7. 将 `codex-config.toml.example` 复制到 `/var/lib/codexrunner/codex/config.toml`（`root:codexrunner 0640`）。该文件只指向本机模型代理，并配置 `public_web` stdio MCP，不保存真实密钥。确认 venv 已安装 `mcp==1.30.0`，且 `public_web.py`、`public_web_mcp.py` 为 root 管理的代码。保持 `web_search="disabled"`；`default_permissions` 位于 TOML 根级，`network_proxy=true` 和 `codex-net-read`/`codex-net-write` profile 为命令网络启用 `mode="full"`、域名 `*` 放行。只读任务不能写会话工作区或 `.tmp`；工作区写入任务可写分配的会话工作区和 `.tmp`。有本次或保留图片输入的任务会自动切到工作区写入 profile，以便生成图片结果。
+7. 将 `codex-config.toml.example` 复制到 `/var/lib/codexrunner/codex/config.toml`（`root:codexrunner 0640`）。该文件只指向本机模型代理，并配置 `public_web` stdio MCP，不保存真实密钥。确认 venv 已安装 `mcp==1.30.0`，且 `public_web.py`、`public_web_mcp.py` 为 root 管理的代码。保持 `web_search="disabled"`；`default_permissions` 位于 TOML 根级，`network_proxy=true` 和 `codex-net-read`/`codex-net-write` profile 为命令网络启用 `mode="full"`、域名 `*` 放行。只读任务可写指定 `.tmp` 和 `output/`，其他会话目录仍只读；工作区写入任务可写分配的会话工作区。有本次或保留图片输入的任务会自动切到工作区写入 profile，以便生成图片结果。
 8. 安装 `deploy/systemd/*.service` 到 `/etc/systemd/system/`，按需递归安装对应 `*.service.d/` drop-in；统一目录的 `workspace.conf` 需先按 [WORKSPACE](docs/WORKSPACE.md) 配好挂载。`public-images.conf` 需要已有回环代理。安装防火墙、执行 `systemctl daemon-reload`，然后按运维文档启用服务。通过 SSH 隧道在本地填写 QQ 凭据、启用主模型和适配器。
 9. 把确认后的完整群 UMO 放入 AstrBot 主白名单和需要启用的插件 `allowed_umos`。AstrBot **主白名单为空会放行所有会话**，初始占位值应一直保留到替换为真实允许列表；各插件的空列表则拒绝所有会话。不要开启管理员绕过。
 
@@ -81,6 +83,8 @@ QQ 凭据保存在服务器上的受限主配置中；模型密钥经环境变�
 
 上述 GET 和目标地址限制由网页 MCP 执行。Codex 命令也已获准联网，其网络 profile 放行所有域名，不具备网页 MCP 相同的公开地址校验和 GET 限制。文件写入权限由任务模式独立控制。`allow_local_binding=false` 是 Codex 网络代理的本地/私网访问选项，不应只理解为控制监听端口；当前 profile 未配置精确的 localhost 或私网 IP 放行规则。
 
+抖音分享链接使用 `read_douyin_video`，不是文本网页读取器。工具通过临时匿名浏览器取得作品原始详情与视频／音频／字幕资源，Codex 自行检查实际画面；不复用小红书登录，不自动发布或转发原视频。浏览器安装、资源限额和真实验收见 [抖音说明](docs/DOUYIN.md)。
+
 长期记忆不需要 Codex。可发送“记住我希望回答简洁一点”“把关于饮料的记忆改成我喜欢咖啡”“忘记我喜欢喝茶这条记忆”“查看我的长期记忆”或“清空我的长期记忆”。插件只从当前顶层消息识别明确请求，不把引用、转发、否定句或示例中的指令当作授权；不明确的修改目标需要补充。普通聊天不自动保存。相关记忆会提供给同一群、同一发送者的普通回答和 Codex 任务，但不会授予任何工具权限。记忆数据库仅由 AstrBot 插件按当前用户范围写入，不给 Codex 数据库读写权限。
 
 长期记忆删除只影响该插件中的条目，不会删除已有聊天记录、旧 Codex 会话或外部备份。详见 [记忆插件说明](plugins/long_term_memory/README.md)。
@@ -98,6 +102,7 @@ python3 -m unittest discover -s plugins/travel_assistant -p 'test_*.py' -v
 python3 -m unittest discover -s plugins/xhs_search -p 'test_*.py' -v
 python3 plugins/long_term_memory/test_memory.py
 python3 -m unittest discover -s services -p 'test_public_web.py' -v
+python3 -m unittest discover -s services -p 'test_douyin*.py' -v
 python3 -m unittest discover -s tests -p 'test_portable_*.py' -v
 python3 -m unittest discover -s tests -p 'test_timeout_bridge.py' -v
 python3 -m unittest discover -s tests -p 'test_public_image_download.py' -v
@@ -130,3 +135,11 @@ python3 scripts/privacy_check.py --staged --history
 - 不把仓库更新自动发布到服务器；升级 AstrBot 时需重新核对补丁哈希和运行 API。
 
 第三方源码补丁的授权说明见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
+
+## 新增能力
+
+- 已授权 UMO 之间共享 Codex 列表、状态、结果、附件和续接；部署时应按需要选择授权范围。每轮工具仍绑定当前提问者，记忆和提醒管理保持原权限。
+- 任务失败先回传原因，再带原请求和原因新建一次自动重试。可信 Codex 可以创建有数量和深度上限的独立子任务。
+- 抖音多链接串行读取，选取较小的合规流并真实下载、抽帧检查；临时媒体与保留会话状态分开限额。
+- [闲鱼登录与监控](docs/XIANYU.md)：群／私聊扫码、账号校验与私密持久化、即时查询、去重新商品提醒，默认仅名称价格链接。
+- [语音输入](docs/VOICE.md)：可选独立转写 worker，转写后进入当前消息路由。

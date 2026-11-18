@@ -1,6 +1,7 @@
 """Run against the installed AstrBot venv, with only fake outbound transport."""
 import asyncio
 import json
+import itertools
 import tempfile
 import time
 from pathlib import Path
@@ -17,16 +18,18 @@ from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.api.message_components import Plain, At, Reply
 from reminder.main import Main, AddressedGroup
 
+_MESSAGE_IDS = itertools.count()
 
-def event(text, sender="alice", group="test-group", addressed=True, parts=None):
+
+def event(text, sender="alice", group="test-group", addressed=True, parts=None, private=False):
     msg = AstrBotMessage()
-    msg.type = MessageType.GROUP_MESSAGE
+    msg.type = MessageType.FRIEND_MESSAGE if private else MessageType.GROUP_MESSAGE
     msg.message = parts if parts is not None else [Plain(text)]
     msg.message_str = text
     msg.sender = MessageMember(sender)
     msg.group_id = group
     msg.self_id = "bot"
-    msg.message_id = "test-id"
+    msg.message_id = "test-id-" + str(next(_MESSAGE_IDS))
     value = AstrMessageEvent(text, msg, PlatformMetadata("qq_official", "test", "test"), group)
     value.is_at_or_wake_command = addressed
     value.send = AsyncMock()
@@ -108,6 +111,28 @@ async def main():
         assert natural.extras_configs["priority"] == 90
         assert all(f.filter(event(""), {}) for f in natural.event_filters)
         assert not all(f.filter(event("", addressed=False), {}) for f in natural.event_filters)
+        private = event("两分钟后提醒我喝水", group="private-alice", private=True)
+        plugin.allowed_umos.add(private.unified_msg_origin)
+        assert all(f.filter(private, {}) for f in natural.event_filters)
+        await plugin.natural_reminder(private)
+        assert private.is_stopped() and private.send.call_count == 1
+        own = [item for item in plugin._reminders if item["umo"] == private.unified_msg_origin]
+        assert len(own) == 1 and own[0]["sender"] == "alice" and own[0]["text"] == "喝水"
+        assert AddressedGroup().filter(private, {})
+        voiced = event("", group="private-alice", private=True)
+        voiced.set_extra("voice_input_transcribed", True)
+        voiced.set_extra("voice_input_transcript", "三分钟后提醒我站起来")
+        await plugin.natural_reminder(voiced)
+        assert any(item["umo"] == private.unified_msg_origin and item["text"] == "站起来" for item in plugin._reminders)
+        delayed = event("两分钟后提醒我散步", group="private-alice", private=True)
+        delayed.message_obj.timestamp = time.time() - 45
+        await plugin.natural_reminder(delayed)
+        delayed_record = next(item for item in plugin._reminders if item["text"] == "散步")
+        assert abs(delayed_record["due_at"] - delayed.message_obj.timestamp - 120) < .01
+        missed = event("两分钟后提醒我洗杯子", group="private-alice", private=True)
+        missed.message_obj.timestamp = time.time() - 180
+        await plugin.natural_reminder(missed)
+        assert not any(item["text"] == "洗杯子" for item in plugin._reminders)
         print("PASS reminder runtime: real imports/schema/registration, authorization, routing, persistence, ownership, Markdown delivery, retry")
 
 

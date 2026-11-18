@@ -67,7 +67,7 @@ async def main():
             accepted = event()
             await plugin.codex(accepted, "test task")
             assert accepted.send.call_count == 1 and len(plugin.routes) == 1
-            connect.assert_awaited_once_with("/tmp/synthetic-bridge.sock", limit=4 * 1024 * 1024)
+            connect.assert_awaited_once_with("/tmp/synthetic-bridge.sock", limit=16 * 1024 * 1024)
             payload = json.loads(writer.write.call_args.args[0])
             assert payload["mode"] == "read-only" and len(payload["workspace"]) == 32
             assert payload["prompt"] == "test task"

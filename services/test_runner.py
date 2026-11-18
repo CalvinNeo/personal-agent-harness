@@ -39,6 +39,20 @@ SUCCESS = fake_program(
 
 
 class CommandSecurityTests(unittest.TestCase):
+    def test_only_task_scoped_douyin_download_is_autoapproved_for_new_and_resumed_jobs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            workspace, home = root / "workspace", root / "home"
+            workspace.mkdir()
+            home.mkdir()
+            expected = 'mcp_servers.public_web.tools.download_douyin_media.approval_mode="approve"'
+            normal = r.command(workspace, "read-only")
+            resumed = r.command(workspace, "read-only", session_home=home,
+                                resume_thread_id="11111111-1111-4111-8111-111111111111")
+            self.assertIn(expected, normal)
+            self.assertIn(expected, resumed[resumed.index("resume"):])
+            self.assertFalse(any("public_web.default_tools_approval_mode" in value for value in normal))
+
     def test_required_wrapper_and_mount_isolation(self):
         workspace = Path("/var/lib/codexrunner/workspaces/" + WORKSPACE)
         for mode in ("read-only", "workspace-write"):
@@ -60,11 +74,14 @@ class CommandSecurityTests(unittest.TestCase):
                 "--dir", "/var/lib/codexrunner/workspaces",
                 "--bind" if mode == "workspace-write" else "--ro-bind", str(workspace), str(workspace),
                 "--bind", str(workspace / ".tmp"), str(workspace / ".tmp"),
+                "--bind", str(workspace / "output"), str(workspace / "output"),
                 "--tmpfs", "/run/astrbot-codex", "--chdir", str(workspace), "--",
                 "/usr/local/bin/codex", "exec", "--ephemeral", "--json",
                 "--disable", "plugins", "--disable", "apps", "--skip-git-repo-check",
-                "-c", 'default_permissions="' + ("codex-net-write" if mode == "workspace-write" else "codex-net-read") + '"',
-                "-c", 'web_search="disabled"', "-C", str(workspace), "-m", r.MODEL, "-",
+                "-c", 'default_permissions="codex-net-write"',
+                "-c", 'web_search="disabled"', "-C", str(workspace), "-m", r.MODEL,
+                "-c", 'mcp_servers.public_web.tools.download_douyin_media.approval_mode="approve"',
+                "-c", 'mcp_servers.public_web.tool_timeout_sec=300', "-",
             ]
             self.assertEqual(cmd, expected)
         with self.assertRaisesRegex(ValueError, "invalid mode"):
@@ -127,6 +144,32 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(job["state"], "completed")
                 self.assertEqual(job["result"], "survived")
 
+    async def test_worker_receives_current_conversation_delivery_contract(self):
+        captured = self.root / "worker-input.txt"
+        self.program = fake_program(
+            emit({"type": "thread.started", "thread_id": "11111111-1111-4111-8111-111111111111"}),
+            emit({"type": "item.completed", "item": {"type": "agent_message", "text": "大家好"}})
+        ).replace("sys.stdin.read()", "__import__('pathlib').Path(" + repr(str(captured)) + ").write_text(sys.stdin.buffer.read().decode())")
+        payload = request()
+        payload["prompt"] = "在当前 QQ 群说大家好"
+        self.manager.request(payload)
+        result = await self.finished()
+        self.assertEqual(result["result"], "大家好")
+        worker_input = captured.read_text()
+        self.assertIn("automatically delivered", worker_input)
+        self.assertIn("exact originating QQ conversation", worker_input.replace("the exact ", "exact "))
+        self.assertIn("native QQ @", worker_input)
+        self.assertIn("Do not independently send messages", worker_input)
+        self.assertIn("structured source data", worker_input)
+        self.assertIn("video streams and subtitle resources", worker_input)
+        self.assertIn("public_web.read_douyin_video", worker_input)
+        self.assertIn("public_web.download_douyin_media", worker_input)
+        self.assertIn("inspect the actual media yourself", worker_input)
+        self.assertIn("reject private-network targets", worker_input)
+        self.assertIn("not evidence that the video", worker_input)
+        self.assertNotIn("Do not send messages to QQ, email", worker_input)
+        self.assertTrue(worker_input.endswith("Task:\n在当前 QQ 群说大家好"))
+
     async def test_rejected_peer_never_submits(self):
         socket_path = str(self.root / "test.sock")
         with patch.object(r, "peer_uid", return_value=1234):
@@ -166,11 +209,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             self.manager.request(collision)
         self.manager.request(request("2222222222222222"))
         self.manager.request(request("3333333333333333"))
+        self.manager.request(request("4444444444444444"))
         with self.assertRaisesRegex(ValueError, "queue is full"):
-            self.manager.request(request("4444444444444444"))
+            self.manager.request(request("5555555555555555"))
         await asyncio.sleep(.04)
-        self.assertEqual([j["state"] for j in self.manager.jobs.values()], ["running", "queued", "queued"])
-        await self.finished("3333333333333333")
+        self.assertEqual([j["state"] for j in self.manager.jobs.values()], ["running", "queued", "queued", "queued"])
+        await self.finished("4444444444444444")
         self.assertTrue(all(j["state"] == "completed" for j in self.manager.jobs.values()))
 
     async def test_turn_failure_even_with_exit_zero_and_answer(self):

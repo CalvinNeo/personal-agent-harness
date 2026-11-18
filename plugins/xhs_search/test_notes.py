@@ -15,7 +15,7 @@ from PIL import Image as PillowImage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from xhs_search.core import XHSClient, XHSError
-from xhs_search.notes import (ReferenceStore, download_image, image_url, normalize_note, search_references,
+from xhs_search.notes import (ReferenceStore, download_image, image_url, normalize_note, note_links, search_references,
                               strip_markdown_images, validate_image)
 
 
@@ -30,6 +30,42 @@ def picture():
 
 
 class NotesTests(unittest.TestCase):
+    def test_shared_links_accept_both_official_paths_and_encoded_access(self):
+        for host in ("www.xiaohongshu.com", "xiaohongshu.com"):
+            for path in ("explore", "discovery/item"):
+                with self.subTest(host=host, path=path):
+                    identifiers, references = note_links(
+                        f"https://{host}/{path}/synthetic-note?type=video&xsec_token=access%2Bvalue%2Fok%3D\n给我总结下"
+                    )
+                    self.assertEqual(identifiers, ["synthetic-note"])
+                    self.assertEqual(references, {"synthetic-note": {"feed_id": "synthetic-note", "xsec_token": "access+value/ok="}})
+
+    def test_shared_links_preserve_literal_plus_and_trim_message_punctuation(self):
+        identifiers, references = note_links("总结(https://www.xiaohongshu.com/explore/note-one?xsec_token=access+value=)。")
+        self.assertEqual(identifiers, ["note-one"])
+        self.assertEqual(references["note-one"]["xsec_token"], "access+value=")
+
+    def test_shared_links_reject_foreign_hosts_userinfo_ports_and_paths(self):
+        for url in ("http://www.xiaohongshu.com/explore/note-one", "https://127.0.0.1/explore/note-one",
+                    "https://www.xiaohongshu.com.evil.invalid/explore/note-one", "https://evil.invalid/https://www.xiaohongshu.com/explore/note-one",
+                    "https://" + "user@" + "www.xiaohongshu.com/explore/note-one", "https://www.xiaohongshu.com:8080/explore/note-one",
+                    "https://www.xiaohongshu.com/explore/note-one/extra", "https://www.xiaohongshu.com/explore/note%2Fone",
+                    "https://www.xiaohongshu.com\\@evil.invalid/explore/note-one", "file:///etc/passwd"):
+            with self.subTest(url=url):
+                self.assertEqual(note_links(url + "?xsec_token=synthetic-access"), ([], {}))
+
+    def test_missing_or_ambiguous_access_does_not_hide_valid_note_identity(self):
+        for query in ("", "?xsec_token=", "?xsec_token=one&xsec_token=two", "?xsec_token=access%20value",
+                      "?xsec_token=%ZZ", "?xsec_token=" + "a" * 2049):
+            with self.subTest(query=query[:80]):
+                self.assertEqual(note_links("https://www.xiaohongshu.com/discovery/item/note-one" + query), (["note-one"], {}))
+
+    def test_shared_link_extraction_is_bounded_and_deduplicates(self):
+        links = [f"https://www.xiaohongshu.com/explore/note-{index}?xsec_token=synthetic-access" for index in range(12)]
+        identifiers, references = note_links("\n".join([links[0], *links]))
+        self.assertEqual(identifiers, [f"note-{index}" for index in range(10)])
+        self.assertEqual(set(references), set(identifiers))
+
     def test_only_exact_cdn_hosts_https_and_no_userinfo(self):
         self.assertEqual(image_url(URL.replace("https:", "http:")), URL)
         for url in ("http://127.0.0.1/image", "https://sns-webpic-qc.xhscdn.com.evil.invalid/a", "file:///etc/passwd",

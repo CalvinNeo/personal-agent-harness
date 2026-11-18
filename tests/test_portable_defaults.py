@@ -34,7 +34,7 @@ class DefaultConfigurationTests(unittest.TestCase):
         self.assertTrue(all(not value["enable"] for value in chat["providers"]))
 
     def test_plugin_examples_do_not_authorize_real_identities(self):
-        names = ("codex_bridge", "image_context", "intent_router", "long_term_memory", "reminder", "travel_assistant", "xhs_search")
+        names = ("codex_bridge", "image_context", "intent_router", "long_term_memory", "reminder", "travel_assistant", "xhs_search", "xianyu_watch")
         for name in names:
             with self.subTest(plugin=name):
                 config = template(name + "_config")
@@ -45,6 +45,20 @@ class DefaultConfigurationTests(unittest.TestCase):
         xhs = template("xhs_search_config")
         self.assertEqual(xhs["login_umos"], [])
         self.assertEqual(xhs["login_senders"], [])
+
+    def test_xianyu_sharing_and_media_keep_empty_scope_authorization(self):
+        config = template("xianyu_watch_config")
+        self.assertEqual(config["login_umos"], [])
+        self.assertEqual(config["login_senders"], [])
+        self.assertTrue(config["shared_login_members"])
+        self.assertFalse(config["send_product_images"])
+        self.assertEqual(config["endpoint"], "http://127.0.0.1:18070")
+        self.assertEqual(config["api_token_file"], "/etc/xianyu/api-token")
+        schema = json.loads((ROOT / "plugins/xianyu_watch/_conf_schema.json").read_text())
+        self.assertTrue(schema["shared_login_members"]["default"])
+        self.assertFalse(schema["send_product_images"]["default"])
+        for key in ("allowed_umos", "allowed_senders", "login_umos", "login_senders"):
+            self.assertEqual(schema[key]["default"], [])
 
     def test_initialized_chat_preserves_functional_defaults(self):
         config = initializer.build_config("synthetic-test-password", "https://api.example.com/v1", "gpt-6-astra", True)
@@ -60,6 +74,7 @@ class DefaultConfigurationTests(unittest.TestCase):
         self.assertFalse(config["platform"][0]["enable"])
         self.assertEqual(config["platform"][0]["appid"], "")
         self.assertEqual(config["platform"][0]["secret"], "")
+        self.assertEqual(config["platform"][0]["text_mention_aliases"], [])
         self.assertEqual(config["admins_id"], [])
         self.assertEqual(config["platform_settings"]["id_whitelist"], ["__deny_all_until_configured__"])
 

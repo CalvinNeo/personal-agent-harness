@@ -2,6 +2,18 @@
 
 以下命令面向使用本仓库模板部署的 Linux 服务器，需要管理员权限。`SERVER_HOST` 是占位符，必须替换成自己的服务器地址。仓库采用通用路径与参数；已经运行的实例以实际 systemd 单元和本机配置为准。
 
+## 定时任务
+
+`codex_bridge` 1.6.0 在原有授权会话提供持久化定时执行，默认启用，不自动创建任何任务。
+`jobs.json` 同时保存任务规则、归属、执行中的任务编号和回传状态；备份／回滚时不能用空文件覆盖。
+升级前检查普通执行、待回传、临近提醒和定时器的 `next_run_at`；维护期间不要吞掉用户任务。
+停止入口为 `/定时任务停止 <编号>`，列表为 `/定时任务列表`。`scheduled_tasks_enabled=false` 关闭
+新触发与待回传结果，仍保留记录。QQ 主动消息受平台权限约束，连续回传失败会暂停该定时器。
+每轮走同一隔离 runner；同时在跑的同一定时任务不会叠加，恢复后最多补一次，不追补全部错过周期。
+真实验收使用独立状态目录和禁用 QQ 的发送桩，不向真实会话创建测试定时任务。用真实模型核对
+“创建回执→持久化重载→到点执行→结果捕获→暂停/取消”，不能仅以记录存在就宣布可用。
+用法及边界见 [Codex bridge](../plugins/codex_bridge/README.md)。
+
 ## 目录分工
 
 | 路径 | 用途 | 是否纳入 Git |
@@ -12,6 +24,7 @@
 | `/var/lib/astrbot/data/config` | 插件私有配置、会话和发送者白名单 | 否 |
 | `/var/lib/astrbot/data/cmd_config.json` | AstrBot、QQ、模型和后台私有配置 | 否 |
 | `/var/lib/astrbot/data/plugins/reminder/reminders.json` | 待执行提醒及提醒内容 | 否 |
+| `/var/lib/astrbot/data/plugins/codex_bridge/jobs.json` | Codex 回传路由、定时任务与逐轮执行状态；0600 | 否 |
 | `/var/lib/astrbot/data/plugins/long_term_memory/memory.sqlite3` | 按群与发送者隔离的长期记忆；另有 SQLite 辅助文件 | 否 |
 | `/var/lib/codexrunner` | Codex 配置、任务记录、按会话隔离的工作目录和原图 | 否 |
 | `/var/lib/codexproxy/upstream-token` | 代理使用的上游模型密钥 | 否 |
@@ -31,11 +44,15 @@
 
 长期记忆单独读取 `long_term_memory_config.json` 的允许列表，空 `allowed_umos` 拒绝读写。确认 `memory_file` 位于私有状态目录，目录为 `astrbot:astrbot 0700`，数据库和存在的 `-wal`、`-shm` 文件为 `0600`。数据库只由 AstrBot 插件按授权请求写入；Codex 通过桥接获得相关条目，不具有数据库读写权限。记忆不会因为重启丢失；替换插件源码时保留这些文件。
 
-公开网页 MCP 依赖 `/opt/astrbot/venv` 中的 `mcp==1.30.0` 和 root 管理的 `public_web.py`、`public_web_mcp.py`。从 `codex-config.toml.example` 安装配置到 `/var/lib/codexrunner/codex/config.toml`，设为 `root:codexrunner 0640`。`default_permissions` 必须在 TOML 根级；保持 `web_search="disabled"`、`features.network_proxy=true`，由 runner 为新建/续接任务选择 `codex-net-read` 或 `codex-net-write`。
+公开网页 MCP 依赖 `/opt/astrbot/venv` 中的 `mcp==1.30.0` 和 root 管理的 `public_web.py`、`public_web_mcp.py`。从 `codex-config.toml.example` 安装配置到 `/var/lib/codexrunner/codex/config.toml`，设为 `root:codexrunner 0640`。`default_permissions` 必须在 TOML 根级；保持 `web_search="disabled"`、`features.network_proxy=true`。runner 1.4.0 为新建/续接任务选择 `codex-net-write`，实际可写范围仍由外层 bubblewrap 按任务模式限制。
+
+抖音读取额外依赖 Playwright 和 root 管理的独立 Chromium 程序，`public_web` 工具超时设为 90 秒。每次使用新的匿名 profile 和临时受限公网传输，不复用任何账号 Cookie。先按 [抖音说明](DOUYIN.md) 验证浏览器沙箱、内存／进程额度和原视频抽帧，再更新服务；不得因浏览器启动失败而关闭 Chromium 或 bubblewrap 隔离。
 
 两个 profile 分别继承 `:read-only` 和 `:workspace`，均启用网络、`mode="full"` 和域名 `*` 放行；`allow_local_binding=false` 是 Codex 网络代理的本地/私网访问选项，并非仅控制监听端口。当前没有精确的 localhost 或私网 IP 放行规则。只有网页 MCP 提供公开地址校验与 GET 限制；shell 命令网络没有同等的地址和请求方法限制。
 
-runner 外层 bubblewrap 将根文件系统只读挂载并隐藏其他任务工作区和私有运行状态；宿主机其他文件是否可读还由 DAC/AppArmor 决定。Codex profile 探针显示 `codex-net-read` 不能写会话工作区或 `.tmp`，`codex-net-write` 可写分配的会话工作区和 `.tmp`，而相邻任务工作区两者都不可读写。含本次或保留图片输入的任务会自动切换到 `codex-net-write`（现有图片处理行为），即使任务原本请求只读。
+runner 外层 bubblewrap 将根文件系统只读挂载并隐藏其他任务工作区和私有运行状态；宿主机其他文件是否可读还由 DAC/AppArmor 决定。只读任务将工作区只读挂载，仅 `.tmp/` 和 `output/` 为可写子挂载，因此不附图片也能生成交付物；完整工作区写入仍需 `write_senders` 授权。含本次或保留图片输入的任务沿用隔离图片任务的可写工作区，原图子目录只读。不能把仅有 CLI profile 的探针当作整条执行链权限证明，应同时验证外层挂载、相邻任务不可读及续接路径。
+
+部署视频回传前安装系统包 `ffmpeg`（同时提供 `ffprobe`）。新增 `codex_bridge/history.py` 和版本文件时保留服务数据目录中的 `chat_history.sqlite3`、记忆、原图及任务路由。当前会话聊天与历史图片可按需查询，当前用户记忆实时读取，不再依赖前置关键词筛选；所有最终 PNG/JPEG/MP4 放入 `output/` 自动返回原会话。详情及限制见插件 README。
 
 先检查模板参数、文件权限和白名单，再启动服务。配置验证脚本不能证明 QQ 平台权限或模型可用，仍需在获准的会话中进行实际验收。只有 Python 语法检查通过，也不能证明插件已被 AstrBot 成功加载。
 

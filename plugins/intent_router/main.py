@@ -9,6 +9,7 @@ from typing import Any
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
+from astrbot.core.pipeline.preprocess_stage.voice_input import get_voice_input_text
 
 from .core import PlannerConfig, PlannerError, RoutePlan, build_planner_prompt, extract_plan
 
@@ -36,6 +37,9 @@ _ROUTE_HINTS = {
 
 
 def _plain_text(event: AstrMessageEvent) -> str:
+    voice_text = get_voice_input_text(event)
+    if voice_text:
+        return voice_text
     parts = []
     for part in event.get_messages():
         text = part.text if isinstance(part, Plain) else None

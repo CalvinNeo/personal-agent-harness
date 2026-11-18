@@ -3,7 +3,7 @@
     "type": "string",
     "default": "regex",
     "enum": ["regex", "light"],
-    "description": "regex=现有正则路径；light=独立轻量模型提示，超时由 Codex 桥接按原权限只读接管；部署模板默认 light"
+    "description": "regex=现有正则路径；light=独立轻量模型做意图提示，超时立即回退"
   },
   "provider_id": {
     "type": "string",

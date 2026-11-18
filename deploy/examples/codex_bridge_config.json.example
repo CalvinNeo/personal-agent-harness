@@ -3,6 +3,8 @@
   "allowed_senders": [],
   "write_senders": [],
   "socket_path": "/run/astrbot-codex/bridge.sock",
+  "codex_first_enabled": false,
+  "scheduled_tasks_enabled": true,
   "natural_language_enabled": true,
   "auto_complex_enabled": true,
   "semantic_routing_enabled": true

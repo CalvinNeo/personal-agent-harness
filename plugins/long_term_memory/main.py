@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,133 @@ MAX_ITEMS = 100
 MAX_LIST_ITEMS = 5
 MAX_CONTEXT_ITEMS = 8
 MAX_INJECT_CHARS = 6000
+
+_DISPLAY_ID = r"[A-Za-z0-9_-]{1,128}"
+_DISPLAY_MENTION = re.compile(r"<@!?(" + _DISPLAY_ID + r")>")
+_DISPLAY_QQ_CANONICAL = re.compile(r'<qqbot-at-user\s+id="(' + _DISPLAY_ID + r')"\s*/>')
+_DISPLAY_QQ_TAG = re.compile(r"<\s*/?\s*qqbot-at-[^>]*>", re.I)
+_DISPLAY_FACT = re.compile(r"^<@!?(" + _DISPLAY_ID + r")>\s*是\s*<@!?(" + _DISPLAY_ID + r")>\s*的\s*(老公|丈夫|老婆|妻子|爸爸|父亲|妈妈|母亲)$")
+_DISPLAY_HEADER = re.compile(r"^(?:(?:请)?记住\s*)?(?:(?:本群|当前群|群里)(?:的)?\s*)?(?:人物关系|成员关系|家庭关系|关系)\s*(?:是|为)?\s*[:：]\s*")
+_DISPLAY_KINDS = {"老公": "husband", "丈夫": "husband", "老婆": "wife", "妻子": "wife", "爸爸": "father", "父亲": "father", "妈妈": "mother", "母亲": "mother"}
+_DISPLAY_RESERVED = frozenset({"all", "everyone", "here", "qq_official"})
+
+
+def _display_markup(content: str) -> str:
+    """Normalize known user references only inside the display layer."""
+    value = _DISPLAY_QQ_CANONICAL.sub(lambda match: "<@" + match[1] + ">", content)
+    return _DISPLAY_QQ_TAG.sub("QQ账号引用", value)
+
+
+def _display_replace(content: str, aliases: dict[str, str]) -> str:
+    return _DISPLAY_MENTION.sub(lambda match: aliases.get(match[1], "QQ账号引用"), _display_markup(content))
+
+
+def _display_facts(content: str) -> list[tuple[str, str, str]]:
+    """Parse a complete saved fact record; never lift facts from prose."""
+    value = _display_markup(unicodedata.normalize("NFKC", content)).strip()
+    if not value or len(value) > 6000 or any(marker in value for marker in ('`', '"', "'", "“", "”", "‘", "’", "「", "」", "『", "』")):
+        return []
+    if re.search(r"(?m)^\s*>|(?:如果|假设|例如|比如|示例|例子|教程|引用|忽略|提示词|指令|是否|是不是)", value):
+        return []
+    value = _DISPLAY_HEADER.sub("", value, count=1)
+    value = re.sub(r"^(?:请)?记住\s*[:：]?\s*", "", value, count=1)
+    facts = []
+    for clause in [part.strip() for part in re.split(r"[，,；;。\n]+", value) if part.strip()]:
+        match = _DISPLAY_FACT.fullmatch(clause)
+        if not match:
+            return []
+        subject, other, relation = match.groups()
+        if subject == other or subject.lower() in _DISPLAY_RESERVED or other.lower() in _DISPLAY_RESERVED:
+            return []
+        facts.append((subject, other, _DISPLAY_KINDS[relation]))
+    return facts
+
+
+def _display_relationships(content: str, sender: str, facts: list[tuple[str, str, str]], aliases: dict[str, str]) -> str:
+    own_facts = _display_facts(content)
+    if not own_facts:
+        return _display_replace(content, aliases)
+    relations: dict[tuple[str, str], set[str]] = {}
+    for subject, other, relation in facts:
+        relations.setdefault((other, relation), set()).add(subject)
+        if relation in {"husband", "wife"}:
+            inverse = "wife" if relation == "husband" else "husband"
+            relations.setdefault((subject, inverse), set()).add(other)
+    conflict = any(len(targets) != 1 for targets in relations.values())
+    parents_graph: dict[str, set[str]] = {}
+    for subject, other, relation in facts:
+        if relation in {"father", "mother"}:
+            parents_graph.setdefault(other, set()).add(subject)
+    visited, visiting = set(), set()
+
+    def has_parent_cycle(person):
+        if person in visiting:
+            return True
+        if person in visited:
+            return False
+        visiting.add(person)
+        if any(has_parent_cycle(parent) for parent in parents_graph.get(person, ())):
+            return True
+        visiting.remove(person)
+        visited.add(person)
+        return False
+
+    conflict = conflict or any(has_parent_cycle(person) for person in parents_graph)
+    spouse_kinds: dict[str, set[str]] = {}
+    for person, kind in relations:
+        if kind in {"husband", "wife"}:
+            spouse_kinds.setdefault(person, set()).add(kind)
+    conflict = conflict or any(len(kinds) > 1 for kinds in spouse_kinds.values())
+    spouse_relations = {key[1] for key in relations if key[0] == sender and key[1] in {"husband", "wife"}}
+    conflict = conflict or len(spouse_relations) > 1
+    if conflict:
+        raw = _display_replace(content, aliases)
+        return "人物关系记录存在冲突，暂用成员代号区分：\n" + raw
+    spouse_kind = next(iter(spouse_relations), None)
+    spouse = next(iter(relations[(sender, spouse_kind)])) if spouse_kind else None
+    spouse_label = {"wife": "妻子", "husband": "丈夫"}.get(spouse_kind, "")
+    known: dict[str, str] = {sender: "你"}
+    if spouse:
+        known[spouse] = "你的" + spouse_label
+    parents = {}
+    parent_conflict = False
+    for child, prefix in ((sender, "你的"), (spouse, "你" + spouse_label + "的")):
+        if not child:
+            continue
+        for relation, label in (("father", "父亲"), ("mother", "母亲")):
+            targets = relations.get((child, relation), set())
+            if len(targets) == 1:
+                person = next(iter(targets))
+                if person in known or person in parents and parents[person] != prefix + label:
+                    # Conflicting roles never become a resolved family label.
+                    parent_conflict = True
+                    continue
+                parents[person] = prefix + label
+    if parent_conflict:
+        raw = _display_replace(content, aliases)
+        return "人物关系记录存在冲突，暂用成员代号区分：\n" + raw
+    known.update(parents)
+    lines, recorded_parents, couple = [], [], False
+    for subject, other, relation in own_facts:
+        if relation in {"husband", "wife"} and spouse and {subject, other} == {sender, spouse}:
+            if not couple:
+                lines.append("你与" + spouse_label + "是夫妻。")
+                couple = True
+        elif (relation in {"father", "mother"} and subject in parents and other in {sender, spouse}
+              and parents[subject] == (("你的" if other == sender else "你" + spouse_label + "的") + {"father": "父亲", "mother": "母亲"}[relation])):
+            label = parents[subject]
+            if label not in recorded_parents:
+                recorded_parents.append(label)
+        else:
+            subject_label = known.get(subject, aliases[subject])
+            object_label = known.get(other, aliases[other])
+            relation_label = {"husband": "丈夫", "wife": "妻子", "father": "父亲", "mother": "母亲"}[relation]
+            lines.append(f"{subject_label}是{object_label}的{relation_label}。")
+    if recorded_parents:
+        recorded_parents.sort(key=lambda label: (not label.startswith("你的"), label))
+        compact = [label[1:] if label.startswith("你妻子") or label.startswith("你丈夫") else label for label in recorded_parents]
+        lines.append("已记录" + "、".join(compact) + "。")
+    return "本群人物关系：\n" + "\n".join(lines)
 _MEMORY_AUTH_EXTRA = "long_term_memory_authorized"
 _MEMORY_DONE_EXTRA = "long_term_memory_tool_done"
 TOOL_NAME = "manage_long_term_memory"
@@ -60,12 +188,13 @@ TOOL_DESCRIPTION = (
     "管理当前 QQ 用户在当前群的长期记忆。只有用户明确说‘记住、记录、加入长期记忆、"
     "把某条记忆改为、忘记、删除、查看我的长期记忆或清空长期记忆’时才使用。"
     "普通聊天中的事实不要自动保存。只能操作当前用户自己的记忆；不能查看或修改其他用户。"
+    "查看清单是只读操作，会汇总当前发送者在已授权 QQ 会话中的记忆；增删改和清空仍只作用于当前会话。"
     "保存前拒绝密钥、密码、验证码、访问令牌、SSH 私钥等敏感信息。删除和清空必须严格按用户原话。"
 )
 ROUTING_INSTRUCTION = (
     "[长期记忆能力已接入] 只有当用户明确要求记住、记录、加入长期记忆、修改、忘记、删除、查看或清空"
     "自己的长期记忆时，才调用 manage_long_term_memory；不要因为普通对话提到偏好或事实就保存。"
-    "工具只操作当前 QQ 用户在当前会话的记忆，不能读取其他会话或其他用户。"
+    "列表查询只读汇总当前发送者在已授权 QQ 会话中的记忆；写入、修改、删除和清空仍只操作当前会话，不能读取或修改其他用户。"
     "记忆由本地 SQLite 插件管理，不是工作区 Markdown 文件，不能交给 Codex 创建 memory.md 或 long_term_memory.md。"
     "必须等工具返回成功后才能确认写入；只读工作区权限与本插件的记忆写入无关。"
 )
@@ -100,6 +229,10 @@ _RETRIEVAL_TOPICS = {
 
 def _plain_text(event: AstrMessageEvent) -> str:
     # Only the user's top-level message: never traverse Reply/Forward/Node.
+    if event.get_extra("voice_input_transcribed"):
+        text = str(getattr(event, "message_str", "") or event.get_extra("voice_input_transcript") or "").strip()
+        if text:
+            return text
     return " ".join(part.text.strip() for part in event.get_messages()
                     if isinstance(part, Plain) and isinstance(part.text, str) and part.text.strip()).strip()
 
@@ -155,10 +288,21 @@ def _memory_intent(text: str) -> dict[str, Any] | None:
         return None
 
     # Queries are always read-only and are parsed before mutation forms.
-    m = re.fullmatch(_POLITE + r"(?:查看|看看|列出|显示)(?:一下)?(?:我的)?(?:全部)?(?:长期)?记忆(?:第\s*(\d+)\s*页)?[吗呢呀啊？?。！!]*", text, re.I)
+    m = re.fullmatch(_POLITE + r"(?:查看|看看|列出|显示)(?:一下)?(?:我的)?(?:全部|所有)?(?:长期)?记忆(?:第\s*(\d+)\s*页)?[吗呢呀啊？?。！!]*", text, re.I)
     if m:
         return {"action": "list", "page": max(1, int(m[1] or 1))}
-    if re.fullmatch(r"(?:(?:我让你|你(?:都)?)(?:记住|保存|记录)了什么|(?:我|你)?有什么(?:长期)?记忆|我的(?:长期)?记忆(?:有哪些|是什么))[吗呢呀啊？?。！!]*", text, re.I):
+    if re.fullmatch(
+        _POLITE + r"(?:(?:告诉我|说一下|说说|列一下)\s*)?"
+        r"(?:"
+        r"(?:(?:到底|现在|当前|已经)\s*)?(?:我|你)?(?:(?:到底|现在|当前|已经)\s*)?(?:都)?(?:有哪些|有什么)(?:长期)?记忆"
+        r"|(?:我让你|你)(?:现在|已经)?(?:都)?(?:记住|保存|记录)了(?:什么|哪些(?:内容|信息)?)"
+        r"|我的(?:长期)?记忆(?:有哪些|是什么)"
+        r"|你(?:现在)?(?:还)?记得我(?:什么|哪些(?:事情|信息)?)"
+        r"|(?:长期)?记忆(?:里|中|里面)(?:都)?(?:保存|记录)了什么"
+        r")[吗呢呀啊？?。！!]*",
+        text,
+        re.I,
+    ):
         return {"action": "list", "page": 1}
     if _META.search(text):
         return None
@@ -244,7 +388,7 @@ def _tokens(text: str) -> set[str]:
     name="long_term_memory",
     author="local",
     desc="按当前 QQ 群与发送者隔离的长期记忆，支持自然语言记住、修改、忘记和查看",
-    version="1.1.3",
+    version="1.1.8",
 )
 class Main(star.Star):
     def __init__(self, context: star.Context, config: dict[str, Any] | None = None):
@@ -319,6 +463,51 @@ class Main(star.Star):
             "SELECT id, content FROM memories WHERE owner=? ORDER BY updated_at DESC, id DESC LIMIT ?", (owner, limit)
         ).fetchall()]
 
+    @staticmethod
+    def _owner_value(umo: str, sender: str) -> str:
+        return hashlib.sha256(f"{umo}\0{sender}".encode()).hexdigest()
+
+    def _rows_for_sender(self, sender: str, limit: int = MAX_ITEMS) -> list[tuple[int, str]]:
+        """Read all records for this sender across the explicitly authorized sessions."""
+        if self.db is None or not sender:
+            return []
+        owners = [self._owner_value(umo, sender) for umo in self.allowed_umos]
+        if not owners:
+            return []
+        placeholders = ",".join("?" for _ in owners)
+        return [(int(row[0]), str(row[1])) for row in self.db.execute(
+            f"SELECT id, content FROM memories WHERE owner IN ({placeholders}) "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?", (*owners, limit)
+        ).fetchall()]
+
+    def _display_rows_for_sender(self, sender: str, rows: list[tuple[int, str]]) -> dict[int, str]:
+        """Build labels from the record's source group; SQLite stays literal."""
+        members = {match[1] for _, content in rows for match in _DISPLAY_MENTION.finditer(_display_markup(content))}
+        members.update(person for _, content in rows for fact in _display_facts(content) for person in fact[:2])
+        members = sorted(members)
+        codes = "甲乙丙丁戊己庚辛壬癸"
+        others = [member for member in members if member != sender]
+        aliases = {member: "成员" + (codes[index] if index < len(codes) else str(index + 1)) for index, member in enumerate(others)}
+        for member in members:
+            if member.lower() in _DISPLAY_RESERVED:
+                aliases[member] = "QQ账号引用"
+        aliases[sender] = "你"
+        group_owners = {self._owner_value(umo, sender) for umo in self.allowed_umos if ":GroupMessage:" in umo}
+        sources = {}
+        if rows and self.db is not None:
+            placeholders = ",".join("?" for _ in rows)
+            sources = {int(identity): owner for identity, owner in self.db.execute(
+                f"SELECT id, owner FROM memories WHERE id IN ({placeholders})", tuple(identity for identity, _ in rows)).fetchall()}
+        facts_by_group: dict[str, list[tuple[str, str, str]]] = {}
+        for identity, content in rows:
+            owner = sources.get(identity)
+            if owner in group_owners:
+                facts_by_group.setdefault(owner, []).extend(_display_facts(content))
+        return {identity: _display_relationships(content, sender, facts_by_group[sources[identity]], aliases)
+                if sources.get(identity) in facts_by_group and _display_facts(content)
+                else _display_replace(content, aliases)
+                for identity, content in rows}
+
     def _find(self, owner: str, target: str) -> list[tuple[int, str]]:
         target_norm = _normalise(target)
         if re.fullmatch(r"#\d+", target_norm):
@@ -342,10 +531,13 @@ class Main(star.Star):
             return False, "出于安全考虑，我不会把密钥、密码、验证码、令牌或 SSH 私钥写入长期记忆。", ""
         return True, "", value
 
-    async def _apply(self, event: AstrMessageEvent, action: str, *, content: object = "", target: object = "", confirm: bool = False, page: int = 1) -> dict[str, Any]:
+    async def _apply(self, event: AstrMessageEvent, action: str, *, content: object = "", target: object = "", confirm: bool = False, page: int = 1, _codex_call=None) -> dict[str, Any]:
         if not self._allowed(event) or not event.is_at_or_wake_command:
             return {"ok": False, "message": "当前会话或发送者未获准使用长期记忆。"}
         intent = _context_memory_intent(_plain_text(event)) or _memory_intent(_plain_text(event))
+        trusted = callable(_codex_call) and _codex_call(event, TOOL_NAME)
+        if trusted:
+            intent = {"action": action, "content": content, "target": target, "page": page}
         if intent is None or intent["action"] != action:
             return {"ok": False, "message": "当前消息没有明确授权该记忆操作。"}
         if intent.get("from_context"):
@@ -370,17 +562,23 @@ class Main(star.Star):
                 return {"ok": False, "message": "长期记忆存储尚未就绪。"}
             now = time.time()
             if action == "list":
-                all_rows = self._rows(owner, self.max_items)
+                all_rows = self._rows_for_sender(str(event.get_sender_id() or ""), 201)
+                if len(all_rows) > 200:
+                    return {"ok": False, "code": "too_many_records", "items": [], "total": None,
+                            "message": "长期记忆超过当前可读取的 200 条上限，暂时无法返回完整清单；本次没有返回部分记录。"}
                 if not all_rows:
-                    return {"ok": True, "message": "当前还没有保存的长期记忆。", "items": []}
+                    return {"ok": True, "message": "你在已授权会话中还没有保存的长期记忆。", "items": [], "total": 0}
                 pages = math.ceil(len(all_rows) / MAX_LIST_ITEMS)
                 page = min(max(int(page), 1), pages)
                 rows = all_rows[(page - 1) * MAX_LIST_ITEMS:page * MAX_LIST_ITEMS]
-                lines = [f"你在本群的长期记忆（第 {page}/{pages} 页，共 {len(all_rows)} 条）："]
-                lines += [f"#{row_id}. {text}" for row_id, text in rows]
+                displayed = self._display_rows_for_sender(str(event.get_sender_id() or ""), all_rows)
+                title = f"你保存的长期记忆（共 {len(all_rows)} 条）：" if pages == 1 else f"你保存的长期记忆（第 {page}/{pages} 页，共 {len(all_rows)} 条）："
+                lines = [title]
+                offset = (page - 1) * MAX_LIST_ITEMS
+                lines += [f"{offset + index}. {displayed[row_id]}" for index, (row_id, _) in enumerate(rows, 1)]
                 if page < pages:
                     lines.append(f"下一页：/记忆 list {page + 1}")
-                return {"ok": True, "message": "\n".join(lines), "items": [text for _, text in rows], "page": page, "pages": pages}
+                return {"ok": True, "message": "\n\n".join(lines), "items": [text for _, text in rows], "total": len(all_rows), "page": page, "pages": pages}
             if action == "clear":
                 count = self._count_for_owner(owner)
                 self.db.execute("DELETE FROM memories WHERE owner=?", (owner,))
@@ -430,8 +628,47 @@ class Main(star.Star):
     def _count_for_owner(self, owner: str) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM memories WHERE owner=?", (owner,)).fetchone()[0]) if self.db is not None else 0
 
+    def memory_snapshot_for_task(self, event: AstrMessageEvent) -> dict[str, Any]:
+        """Export this sender's authorized records for a single read-only Codex task."""
+        observed_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+        def unavailable(code):
+            return {"status": "unavailable", "code": code, "observed_at": observed_at, "items": [], "total": None}
+        if not self._allowed(event) or not event.is_at_or_wake_command:
+            return unavailable("not_authorized")
+        if self.db is None:
+            return unavailable("read_failed")
+        try:
+            # Two configured sessions can each contain 100 records. Refuse a
+            # truncated snapshot so absence can never be confused with omission.
+            rows = self._rows_for_sender(str(event.get_sender_id() or ""), 201)
+            if len(rows) > 200:
+                return unavailable("too_many_records")
+            display = self._display_rows_for_sender(str(event.get_sender_id() or ""), rows)
+            result = {"status": "ok", "observed_at": observed_at,
+                      "items": [{"id": row_id, "content": value, "display_content": display[row_id]}
+                                for row_id, value in rows], "total": len(rows)}
+            if len(json.dumps(result, ensure_ascii=False).encode()) > 250_000:
+                return unavailable("too_many_records")
+            return result
+        except Exception as error:
+            self.logger.warning("Codex memory snapshot unavailable type=%s", type(error).__name__)
+            return unavailable("read_failed")
+
     async def _reply(self, event: AstrMessageEvent, message: str) -> None:
-        await event.send(MessageChain([Plain(message[:6000])]))
+        await event.send(MessageChain([Plain(message[:6000])], use_markdown_=False))
+
+    def saved_relationship_facts(self, event: AstrMessageEvent) -> list[str]:
+        """Read explicit account relationships for this sender in this group.
+
+        This does not grant messaging authority, infer facts, or modify memory.
+        QQ transport separately validates the current direct message/retry.
+        """
+        if (not self._allowed(event) or not event.is_at_or_wake_command or self.db is None
+                or ":GroupMessage:" not in str(event.unified_msg_origin)):
+            return []
+        return [value for _, value in self._rows(self._owner(event), self.max_items)
+                if re.search(r"<@!?[A-Za-z0-9_-]{1,128}>", value)
+                and re.search(r"老公|丈夫|老婆|妻子|爸爸|父亲|妈妈|母亲", value)]
 
     def memory_context_for_task(self, event: AstrMessageEvent, prompt: str = "") -> str:
         """Read-only scoped retrieval; safe for both normal chat and Codex tasks."""
@@ -533,15 +770,17 @@ class Main(star.Star):
         req.func_tool = ToolSet(list(req.func_tool.tools) if req.func_tool else [])
         req.func_tool.add_tool(FunctionTool(name=TOOL_NAME, description=TOOL_DESCRIPTION, parameters=TOOL_SCHEMA, handler=self.manage_memory_tool))
 
-    async def manage_memory_tool(self, event: AstrMessageEvent, action: str = "", content: str = "", target: str = "", confirm: bool = False, page: int = 1):
+    async def manage_memory_tool(self, event: AstrMessageEvent, action: str = "", content: str = "", target: str = "", confirm: bool = False, page: int = 1, *, _codex_call=None):
         text = _plain_text(event)
         intent = _context_memory_intent(text) or _memory_intent(text)
-        if (not self._allowed(event) or not event.is_at_or_wake_command or intent is None or
-                event.get_extra(_MEMORY_AUTH_EXTRA) != hashlib.sha256(text.encode()).hexdigest() or
-                event.get_extra(_MEMORY_DONE_EXTRA)):
-            return json.dumps({"ok": False, "error": "当前消息未授权使用长期记忆工具。"}, ensure_ascii=False)
-        result = await self._apply(event, str(action), content=content, target=target, page=page)
-        if result.get("ok"):
+        trusted = callable(_codex_call) and _codex_call(event, TOOL_NAME)
+        if not self._allowed(event) or not event.is_at_or_wake_command:
+            return json.dumps({"ok": False, "code": "not_authorized", "error": "当前会话或发送者未获准使用长期记忆。"}, ensure_ascii=False)
+        if not trusted and (intent is None or event.get_extra(_MEMORY_AUTH_EXTRA) != hashlib.sha256(text.encode()).hexdigest()
+                            or event.get_extra(_MEMORY_DONE_EXTRA)):
+            return json.dumps({"ok": False, "code": "intent_required", "error": "当前消息未授权使用长期记忆工具。"}, ensure_ascii=False)
+        result = await self._apply(event, str(action), content=content, target=target, page=page, _codex_call=_codex_call)
+        if result.get("ok") and not trusted:
             event.set_extra(_MEMORY_DONE_EXTRA, True)
-        self._audit(event, str(intent["action"]), result)
+        self._audit(event, str(action), result)
         return json.dumps({"ok": bool(result.get("ok")), "message": result.get("message", "")}, ensure_ascii=False)

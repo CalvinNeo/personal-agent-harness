@@ -31,7 +31,7 @@ def instruction_text(text: str) -> str:
     # Codex and punctuation variants.
     text = html.unescape(str(text or ""))
     text = unicodedata.normalize("NFKC", text).strip()
-    # A leading mention label (for example ``@calvin的智能体``) is addressing
+    # A leading mention label (for example ``@示例智能体``) is addressing
     # the bot, not the task. AstrBot normally removes At components, but some
     # QQ clients serialize them into Plain text; tolerate both forms.
     text = re.sub(r"^(?:(?:@[\w\u4e00-\u9fff.-]+(?:的(?:智能体|机器人))?)|(?:\[At:[^\]]+\]))\s*", "", text)
@@ -352,6 +352,12 @@ def natural_query(text: str, quote_text: str = ""):
     if jid is None:
         match = re.search(r"Codex\s*任务\s*#([a-fA-F0-9]{8,16})", quote_text, re.I)
         jid = match.group(1).lower() if match else None
+    # A quoted failed status board followed by a failure-cause question is a
+    # status explanation request; never reinterpret it as a new task.
+    if (jid and quoted
+            and re.search(r"(?:为什么|为何|什么原因|失败原因|错误原因|哪里失败|怎么失败|报错(?:是什么|原因)?)", text, re.I)
+            and re.search(r"(?:状态\s*[：:]\s*失败|任务执行失败|\bfailed\b)", quote_text, re.I)):
+        return "status", jid
     value = re.sub("codex", "", text, flags=re.I)
     value = re.sub(r"(?:请|帮我|麻烦|现在|当前|这个|这条|那个|刚才|刚刚|的|任务)", "", value)
     if re.fullmatch(r"(?:看(?:一下|下|看)?|查(?:一下|下|询)?|查查)?(?:状态|进度)(?:怎么样|如何|呢|到哪了|到哪儿了)?|(?:完成|结束|好了|做完|跑完)(?:了)?(?:吗|么|没|没有)|(?:跑|执行|运行)到哪(?:了|儿了)|(?:怎么样|如何|还在(?:跑|执行|运行)吗)(?:了)?|status|progress", value, re.I):

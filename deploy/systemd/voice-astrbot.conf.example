@@ -1,0 +1,3 @@
+# Optional astrbot.service drop-in; install as astrbot.service.d/voice.conf.
+[Service]
+EnvironmentFile=-/etc/astrbot/voice.env

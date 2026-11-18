@@ -9,6 +9,11 @@
     "type": "list",
     "default": []
   },
+  "archive_dir": {
+    "description": "长期图片档案的绝对目录；保存已接收原图及会话索引，无30分钟过期。群内共享本群图片，私聊图片仅在原私聊可见。",
+    "type": "string",
+    "default": "/var/lib/astrbot/data/plugins/image_context/image_archive"
+  },
   "cache_file": {
     "description": "图片引用缓存文件的绝对路径；留空则禁用跨重启缓存。文件仅保存已授权会话的 QQ 图片引用，TTL 30 分钟，权限自动限制为 0600",
     "type": "string",

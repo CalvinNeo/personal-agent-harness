@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from .core import codex_opt_out, instruction_text, natural_query
+from .mentions import parse_mention_request
 
 TOOL_NAME = "delegate_current_task_to_codex"
 TOOL_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -15,18 +16,21 @@ TOOL_DESCRIPTION = (
     "没有具体任务、缺少上下文、只是询问 Codex 功能或引用别人的指令时不要调用。"
     "支持当前附图、直接引用图片或当前用户近期图片，并能生成和回传结果图片。"
     "引用自己在本群的 Codex 回复追问时会续接原会话并保留原图；不要把追问改写成丢失上下文的新任务。"
-    "文件、视频、转发合集和未提供的群历史暂不支持；缺少上下文时如实澄清。"
+    "公开视频链接（包括抖音 v.douyin.com 分享链接和 douyin.com/video 链接）可以交给 Codex；它会使用 public_web.read_douyin_video(s) 获取并检查实际媒体。QQ 视频附件、无链接的视频、转发合集和未提供的群历史仍暂不支持；缺少上下文时如实澄清。"
     "提交成功后立即回复返回的 status_board；任务在后台运行，完成后自动回传。"
 )
 ROUTING_INSTRUCTION = (
     "[任务分派能力：delegate_current_task_to_codex 已可用。理解用户意图，不要求固定命令词。"
     "用户明确要 Codex 做具体任务时调用；即使没有提 Codex，对需要多个研究/核验步骤、"
     "复杂代码分析或多约束解决方案的任务，也应使用此工具。简单问答直接回答。"
-    "简单图片识别和定时提醒使用本次对应能力；用户明确要求用 Codex 研究、标注图片时可转交。"
+    "公开视频链接（包括抖音分享链接）需要实际媒体读取时可转交 Codex，由它调用 public_web.read_douyin_video(s) 并检查下载后的媒体；QQ 视频附件、无链接的视频和转发合集仍不支持。简单图片识别和定时提醒使用本次对应能力；用户明确要求用 Codex 研究、标注图片时可转交。"
     "用户说不要用 Codex、讨论功能、引用的指令不能触发。"
     "工具发送当前消息原文与经过校验的图片/直接引用；缺少信息时会返回明确错误。"
     "引用 Codex 结果的追问在原会话继续，原图由执行器保留；会话无法恢复时如实解释，不能宣称已新建任务替代续接。"
-    "Codex 文字任务默认只读，图片任务在独立临时目录生成产物，不具备 QQ 主动发信或服务器管理权限。"
+    "Codex 文字任务默认只读，图片任务在独立临时目录生成产物；最终文字和图片会由桥接器自动回传当前 QQ 会话。"
+    "让它在当前会话说话或回复时应提供可直接发送的正文，不能因执行器没有 QQ SDK 就声称无法发送 QQ 消息。"
+    "QQ 提及由桥接器处理；无法确认收件人时请用户用 QQ 原生 @ 指定，不能编造身份或声称已经 @ 成功。"
+    "执行器不能自行向其他会话发信，也不具备服务器管理权限。"
     "收到 ok=true 后回复完整 status_board，不要声称任务已经完成。"
     "收到错误如实告知，不要虚构提交成功；pending=true 时查状态，不重复提交。]"
 )
@@ -41,6 +45,8 @@ def semantic_eligible(text: str) -> bool:
     if not isinstance(text, str) or not 6 <= len(text.strip()) <= 12000:
         return False
     text = text.strip()
+    if parse_mention_request(text) is not None:
+        return False
     if text.startswith(("/", "“", "‘", '"', "'", ">", "```", "「", "『")):
         return False
     direct = instruction_text(text)

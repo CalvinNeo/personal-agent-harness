@@ -148,6 +148,51 @@ async def main():
             assert types and all(item.filter(current, {}) for item in types for current in (source, group))
             assert memory.db.execute("PRAGMA quick_check").fetchone() == ("ok",)
             report["checks"].append("real AstrBot event filter registers both group and private above planner/Codex priority")
+
+            for index in range(11):
+                await memory.explicit_memory_request(event(f"记住合成清单事项{index}"))
+            expected = memory._rows_for_sender("synthetic-owner")
+            assert len(expected) == 14
+            before = memory.db.execute("SELECT * FROM memories ORDER BY id").fetchall()
+            memory.db.execute("PRAGMA query_only=ON")
+            listed = []
+            for page, question in enumerate(("告诉我到底有哪些长期记忆", "/记忆 list 2", "查看我的长期记忆第3页"), 1):
+                current = event(question, reply=Reply(id="synthetic-old-task", message_str="Codex 任务 #12345678abcdef01"))
+                timeout(current)
+                await bridge.natural_status(current)
+                await memory.explicit_memory_request(current)
+                await router.classify_group_message(current)
+                assert current.is_stopped() and current.get_extra("long_term_memory_tool_done")
+                current.send.assert_awaited_once()
+                message = current.send.call_args.args[0].chain[0].text
+                assert f"第 {page}/3 页，共 14 条" in message
+                listed.extend(line.split(". ", 1)[1] for line in message.splitlines() if line.startswith("#"))
+                if page < 3:
+                    assert f"/记忆 list {page + 1}" in message
+            assert listed == [value for _, value in expected]
+            assert memory.db.execute("SELECT * FROM memories ORDER BY id").fetchall() == before
+            bridge._rpc.assert_not_awaited()
+            provider.text_chat.assert_not_awaited()
+            report["checks"].append("inventory reads every scoped database row across pages with a read-only connection; no planner or Codex submission even with old task reply")
+
+            spoken = event("我有哪些长期记忆？")
+            spoken.set_extra("voice_input_transcribed", True)
+            spoken.set_extra("voice_input_transcript", spoken.message_str)
+            await memory.explicit_memory_request(spoken)
+            assert spoken.is_stopped() and "共 14 条" in spoken.send.call_args.args[0].chain[0].text
+            private_inventory = event("告诉我你现在有哪些长期记忆", private=True)
+            await memory.explicit_memory_request(private_inventory)
+            assert private_inventory.is_stopped() and "共 14 条" in private_inventory.send.call_args.args[0].chain[0].text
+            for question in ("例如：我有哪些长期记忆？", "告诉我张三有哪些长期记忆", "查看我的长期记忆，然后清空"):
+                denied = event(question)
+                await memory.explicit_memory_request(denied)
+                denied.send.assert_not_awaited()
+            denied = event("我有哪些长期记忆？", sender="synthetic-other")
+            await memory.explicit_memory_request(denied)
+            denied.send.assert_not_awaited()
+            assert memory.db.execute("SELECT * FROM memories ORDER BY id").fetchall() == before
+            memory.db.execute("PRAGMA query_only=OFF")
+            report["checks"].append("transcribed inventory request uses existing list path; other sender, third-party request, quoted example and compound delete cannot disclose or mutate records")
             report.update({"ok": True, "count": len(report["checks"]), "storage": "sqlite", "markdown_files_created": 0})
         finally:
             await memory.terminate()

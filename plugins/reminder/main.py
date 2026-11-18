@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -33,7 +34,11 @@ LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 # have been approved for the QQ bot. A UMO includes the platform and group id.
 DEFAULT_ALLOWED_UMOS: set[str] = set()
 REMINDER_FILE = "/var/lib/astrbot/data/plugins/reminder/reminders.json"
-MAX_DELAY_SECONDS = 7 * 24 * 60 * 60
+# ``None`` means no fixed future-date horizon. The old 604800-second
+# configuration value is retained as a compatibility sentinel and is treated
+# as unlimited below, so existing deployments do not keep the seven-day cap.
+MAX_DELAY_SECONDS: int | None = None
+LEGACY_UNLIMITED_MAX_DELAY_SECONDS = 604800
 MIN_DELAY_SECONDS = 5
 MAX_TEXT_CHARS = 500
 MAX_PER_GROUP = 20
@@ -50,7 +55,30 @@ class AddressedGroup(filter.CustomFilter):
 
 def _request_text(event: AstrMessageEvent) -> str:
     # Never execute instructions embedded in forwarded/quoted message chains.
+    if event.get_extra("voice_input_transcribed"):
+        transcript = str(getattr(event, "message_str", "") or event.get_extra("voice_input_transcript") or "").strip()
+        if transcript:
+            return transcript
     return "".join(part.text for part in event.get_messages() if isinstance(part, Plain)).strip()
+
+
+def _request_now(event: AstrMessageEvent) -> datetime:
+    value = event.get_extra("current_request_received_at")
+    current = time.time()
+    if type(value) not in {int, float} or not math.isfinite(value) or value <= 0:
+        value = getattr(getattr(event, "message_obj", None), "timestamp", None)
+        if isinstance(value, datetime):
+            value = value.timestamp() if value.tzinfo is not None else None
+        elif isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                value = parsed.timestamp() if parsed.tzinfo is not None else None
+            except ValueError:
+                value = None
+        if type(value) not in {int, float} or not math.isfinite(value) or not 0 < value <= current + 300:
+            value = current
+        event.set_extra("current_request_received_at", float(value))
+    return datetime.fromtimestamp(value, LOCAL_TZ)
 
 
 def _image_schedule_candidate(event: AstrMessageEvent, text: str) -> bool:
@@ -72,7 +100,7 @@ def _image_schedule_candidate(event: AstrMessageEvent, text: str) -> bool:
     name="reminder",
     author="local",
     desc="本地持久化 QQ 群定时提醒，不经过 Codex",
-    version="1.3.3",
+    version="1.3.6",
 )
 class Main(star.Star):
     def __init__(self, context: star.Context, config: dict[str, Any] | None = None):
@@ -82,7 +110,15 @@ class Main(star.Star):
         self.allowed_umos = {str(x).strip() for x in (cfg.get("allowed_umos") or DEFAULT_ALLOWED_UMOS) if str(x).strip()}
         self.allowed_senders = {str(x).strip() for x in (cfg.get("allowed_senders") or []) if str(x).strip()}
         self.reminder_file = Path(str(cfg.get("reminder_file") or REMINDER_FILE))
-        self.max_delay = min(max(int(cfg.get("max_delay_seconds", MAX_DELAY_SECONDS)), 60), MAX_DELAY_SECONDS)
+        configured_max_delay = cfg.get("max_delay_seconds")
+        if configured_max_delay in (None, 0, LEGACY_UNLIMITED_MAX_DELAY_SECONDS):
+            self.max_delay = None
+        else:
+            try:
+                configured_max_delay = int(configured_max_delay)
+            except (TypeError, ValueError):
+                configured_max_delay = 0
+            self.max_delay = max(configured_max_delay, 60) if configured_max_delay > 0 else None
         self.min_delay = min(max(int(cfg.get("min_delay_seconds", MIN_DELAY_SECONDS)), 1), 3600)
         self.max_text_chars = min(max(int(cfg.get("max_text_chars", MAX_TEXT_CHARS)), 10), MAX_TEXT_CHARS)
         self.max_per_group = min(max(int(cfg.get("max_per_group", MAX_PER_GROUP)), 1), 100)
@@ -326,7 +362,7 @@ class Main(star.Star):
             await event.send(MessageChain([Plain("上一条日程已保存。请明确说“改成明天相同时间”或“改成后天相同时间”。")]))
             return
 
-        now = datetime.now(LOCAL_TZ)
+        now = _request_now(event)
         try:
             parsed = parse_due_many(body, now)
         except ReminderParseError as error:
@@ -338,7 +374,7 @@ class Main(star.Star):
         await self._create_reminders(event, parsed)
 
     @filter.custom_filter(AddressedGroup, priority=90)
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=90)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE, priority=90)
     async def natural_reminder(self, event: AstrMessageEvent):
         if not event.is_at_or_wake_command or not self._allowed(event):
             return
@@ -367,11 +403,11 @@ class Main(star.Star):
             return
         parse_text = light_task if light_accepted and light_route == "reminder" and light_task else text
         try:
-            parsed = parse_natural_many(parse_text, datetime.now(LOCAL_TZ))
+            parsed = parse_natural_many(parse_text, _request_now(event))
         except ReminderParseError as error:
             if parse_text != text:
                 try:
-                    parsed = parse_natural_many(text, datetime.now(LOCAL_TZ))
+                    parsed = parse_natural_many(text, _request_now(event))
                 except ReminderParseError:
                     parsed = None
                 if parsed is not None:
@@ -420,7 +456,7 @@ class Main(star.Star):
         ))
         self.logger.info("schedule tool injected tool=%s existing_tools=%d", TOOL_NAME, len(req.func_tool.tools))
         if not event.get_extra("schedule_tool_instructions"):
-            now = datetime.now(LOCAL_TZ).isoformat(timespec="seconds")
+            now = _request_now(event).isoformat(timespec="seconds")
             instruction = (
                 f"[提醒工具已可用。当前北京时间 {now}。用户要求创建提醒时，先读取本次图片/文字里的日程，"
                 "调用 create_schedule_reminders，items.event_at 填日程原定时间（完整日期、时间、+08:00）；"
@@ -444,19 +480,22 @@ class Main(star.Star):
             event.set_extra("schedule_tool_instructions", True)
 
     async def create_schedule_reminders(self, event: AstrMessageEvent, items, advance_minutes,
-                                        _followup_days: int | None = None):
+                                        _followup_days: int | None = None, *, _codex_call=None):
+        trusted = callable(_codex_call) and _codex_call(event, TOOL_NAME)
         text = _request_text(event)
         pending = self._pending_schedule(event)
         followup_days = _followup_days if _followup_days in {1, 2} else (
             reschedule_followup(text) if pending is not None else None)
-        followup = pending is not None and followup_days in {1, 2}
+        followup = not trusted and pending is not None and followup_days in {1, 2}
         light_schedule = bool(event.get_extra("intent_router_accepted")) and event.get_extra("intent_router_route") == "schedule_reminder"
         image_schedule = bool(event.get_extra("schedule_image_candidate"))
         if (not self._allowed(event) or event.get_platform_name() != "qq_official"
                 or (not event.is_at_or_wake_command and not followup)
-                or not (schedule_intent(text) or followup or light_schedule or image_schedule)):
-            return json.dumps({"ok": False, "error": "本条消息没有授权创建提醒。"}, ensure_ascii=False)
-        previous = event.get_extra("created_schedule_result")
+                or not (trusted or schedule_intent(text) or followup or light_schedule or image_schedule)):
+            return json.dumps({"ok": False, "code": "intent_required", "error": "本条消息没有授权创建提醒。"}, ensure_ascii=False)
+        fingerprint = hashlib.sha256(json.dumps([items, advance_minutes], ensure_ascii=False, sort_keys=True).encode()).hexdigest() if trusted else ""
+        result_key = "created_schedule_result" + (":" + fingerprint if trusted else "")
+        previous = event.get_extra(result_key)
         if previous:
             return previous
         if followup:
@@ -468,7 +507,7 @@ class Main(star.Star):
         try:
             parsed = validate_items(items, advance_minutes, text=validation_text, now=time.time(),
                                     min_delay=self.min_delay, max_delay=self.max_delay,
-                                    max_text=self.max_text_chars)
+                                    max_text=self.max_text_chars, check_requested_lead=not trusted)
         except ValueError as error:
             if "已过或太近" in str(error) and not followup:
                 self._remember_pending_schedule(event, items, advance_minutes, text)
@@ -476,9 +515,16 @@ class Main(star.Star):
         sender = str(event.get_sender_id())
         umo = event.unified_msg_origin
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
-        request_key = hashlib.sha256((umo + "\0" + sender + "\0" + message_id).encode()).hexdigest() if message_id else None
+        request_identity = umo + "\0" + sender + "\0" + message_id
+        original_key = hashlib.sha256(request_identity.encode()).hexdigest() if message_id else None
+        request_key = hashlib.sha256((request_identity + "\0" + fingerprint).encode()).hexdigest() if message_id and trusted else original_key
         async with self._lock:
             existing = [r for r in self._reminders if request_key and r.get("request_key") == request_key]
+            if not existing and trusted and original_key:
+                original = [item for item in self._reminders if item.get("request_key") == original_key
+                            and item["umo"] == umo and item["sender"] == sender]
+                if {(item["due_at"], item["text"]) for item in original} == {(due, content) for due, content, _ in parsed}:
+                    existing = original
             if existing:
                 created = existing
             else:
@@ -504,7 +550,7 @@ class Main(star.Star):
             {"id": item["id"], "text": item["text"],
              "remind_at": datetime.fromtimestamp(item["due_at"], LOCAL_TZ).isoformat(timespec="seconds")}
             for item in created]}, ensure_ascii=False)
-        event.set_extra("created_schedule_result", result)
+        event.set_extra(result_key, result)
         self._pending_schedules.pop(self._schedule_key(event), None)
         self.logger.info("Schedule reminders saved count=%d ids=%s", len(created), ",".join(r["id"] for r in created))
         return result
@@ -536,6 +582,8 @@ class Main(star.Star):
         if not parsed:
             return
         sender = str(event.get_sender_id())
+        message_id = str(getattr(getattr(event, "message_obj", None), "message_id", "") or "")
+        request_key = hashlib.sha256((event.unified_msg_origin + "\0" + sender + "\0" + message_id).encode()).hexdigest() if message_id else None
         now = time.time()
         for due_at, text in parsed:
             if len(text) > self.max_text_chars:
@@ -545,10 +593,15 @@ class Main(star.Star):
             if delay < self.min_delay:
                 await event.send(MessageChain([Plain(f"提醒时间至少需要在 {self.min_delay} 秒后；本次未创建任何提醒。")]))
                 return
-            if delay > self.max_delay:
-                await event.send(MessageChain([Plain("提醒时间不能超过 7 天；本次未创建任何提醒。")]))
+            if self.max_delay is not None and delay > self.max_delay:
+                await event.send(MessageChain([Plain("提醒时间超过当前配置允许的范围；本次未创建任何提醒。")]))
                 return
         async with self._lock:
+            existing = [item for item in self._reminders if request_key and item.get("request_key") == request_key]
+            if existing:
+                lines = ["当前消息的提醒已创建："] + [str(item["id"]) + " · " + str(item["text"]) for item in existing]
+                await event.send(MessageChain([Plain("\n".join(lines))]))
+                return
             group_count = sum(1 for item in self._reminders if item["umo"] == event.unified_msg_origin)
             sender_count = sum(1 for item in self._reminders if item["umo"] == event.unified_msg_origin and item["sender"] == sender)
             count = len(parsed)
@@ -560,7 +613,7 @@ class Main(star.Star):
                 return
             created = [{"id": uuid.uuid4().hex[:8], "umo": event.unified_msg_origin,
                         "sender": sender, "due_at": due_at, "text": text,
-                        "created_at": time.time()} for due_at, text in parsed]
+                        "created_at": time.time(), "request_key": request_key} for due_at, text in parsed]
             old = self._reminders[:]
             self._reminders.extend(created)
             try:

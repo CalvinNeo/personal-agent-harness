@@ -1,0 +1,15 @@
+[Unit]
+Description=On-demand local QQ voice recognition socket
+
+[Socket]
+ListenStream=/run/astrbot-voice.sock
+Accept=yes
+SocketUser=astrbot
+SocketGroup=astrbot
+SocketMode=0600
+MaxConnections=1
+Backlog=1
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

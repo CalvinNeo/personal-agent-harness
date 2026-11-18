@@ -1,0 +1,11 @@
+{
+  "allowed_umos": [],
+  "allowed_senders": [],
+  "login_umos": [],
+  "login_senders": [],
+  "shared_login_members": true,
+  "send_product_images": false,
+  "endpoint": "http://127.0.0.1:18070",
+  "api_token_file": "/etc/xianyu/api-token",
+  "state_file": "/var/lib/astrbot/data/plugins/xianyu_watch/watches.json"
+}

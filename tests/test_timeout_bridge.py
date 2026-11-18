@@ -49,6 +49,8 @@ def load():
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
+    # Keep the package path for production's lazy recipient/context imports.
+    sys.modules[PACKAGE] = package
     return module
 
 

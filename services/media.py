@@ -9,8 +9,11 @@ import base64
 import binascii
 import hashlib
 import io
+import json
+import math
 import os
 import stat
+import subprocess
 import warnings
 from pathlib import Path
 
@@ -20,13 +23,40 @@ MAX_INPUT_TOTAL = 2 * 1024 * 1024
 MAX_ARTIFACTS = 3
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 MAX_ARTIFACT_TOTAL = 6 * 1024 * 1024
+MAX_VIDEO_BYTES = 8 * 1024 * 1024
+MAX_MEDIA_TOTAL = 24 * 1024 * 1024
 MAX_PIXELS = 16_000_000
 MAX_EDGE = 4096
 MIMES = {"image/png": ("PNG", ".png"), "image/jpeg": ("JPEG", ".jpg")}
+ARTIFACT_MIMES = {**MIMES, "video/mp4": ("MP4", ".mp4")}
 
 
 class ArtifactError(ValueError):
-    """Output existed but could not be safely returned as an image."""
+    """Output existed but could not be safely returned as media."""
+
+
+def validate_video(data: bytes) -> bytes:
+    if not 16 <= len(data) <= MAX_VIDEO_BYTES or data[4:8] != b"ftyp":
+        raise ValueError("invalid MP4 size or content")
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-protocol_whitelist", "pipe", "-enable_drefs", "0",
+            "-f", "mov", "-i", "pipe:0", "-show_entries",
+            "format=duration:stream=codec_type,codec_name,width,height", "-of", "json",
+        ], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=True)
+        metadata = json.loads(result.stdout)
+        streams = metadata.get("streams", [])
+        duration = float(metadata.get("format", {}).get("duration", 0))
+        video = [stream for stream in streams if stream.get("codec_type") == "video"]
+        audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        if (not math.isfinite(duration) or not 0 < duration <= 600 or len(video) != 1 or len(audio) > 1
+                or len(video) + len(audio) != len(streams) or video[0].get("codec_name") != "h264"
+                or not 0 < video[0].get("width", 0) <= MAX_EDGE or not 0 < video[0].get("height", 0) <= MAX_EDGE
+                or any(stream.get("codec_name") != "aac" for stream in audio)):
+            raise ValueError("unsupported MP4 streams or duration")
+    except (OSError, subprocess.SubprocessError, AttributeError, TypeError, KeyError, ValueError, OverflowError):
+        raise ValueError("MP4 validation failed; H.264/AAC MP4 up to 8 MiB and 10 minutes is required") from None
+    return data
 
 
 def normalize(data: bytes, mime: str, limit: int) -> bytes:
@@ -137,7 +167,7 @@ def collect_artifacts(workspace: Path, archive: Path, *, strict: bool = False) -
     output = workspace / "output"
     if output.is_symlink() or not output.is_dir():
         if strict:
-            raise ArtifactError("Image output directory is missing or unsafe; no result image can be returned")
+            raise ArtifactError("Media output directory is missing or unsafe; no result media can be returned")
         return []
     artifacts, total = [], 0
     # Only inspect bounded top-level output entries; never recurse.
@@ -145,31 +175,38 @@ def collect_artifacts(workspace: Path, archive: Path, *, strict: bool = False) -
     with os.scandir(output) as entries:
         for index, entry in enumerate(entries):
             if index >= 128:
+                if strict:
+                    raise ArtifactError("Too many output directory entries; keep only final media in output/")
                 break
-            if Path(entry.name).suffix.lower() in {".png", ".jpg", ".jpeg"}:
+            if Path(entry.name).suffix.lower() in {".png", ".jpg", ".jpeg", ".mp4"}:
                 candidates.append(Path(entry.path))
+            elif strict and Path(entry.name).suffix.lower() in {".gif", ".webp", ".svg", ".mov", ".webm", ".avi"}:
+                raise ArtifactError("Unsupported output media format; export PNG/JPEG images or H.264/AAC MP4 videos")
+    if strict and len(candidates) > MAX_ARTIFACTS:
+        raise ArtifactError("At most 3 media outputs can be returned per task; no outputs were silently omitted")
     for path in sorted(candidates):
         if len(artifacts) >= MAX_ARTIFACTS:
             break
-        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        mime = "video/mp4" if path.suffix.lower() == ".mp4" else ("image/png" if path.suffix.lower() == ".png" else "image/jpeg")
         try:
-            data = normalize(read_regular(path, MAX_ARTIFACT_BYTES), mime, MAX_ARTIFACT_BYTES)
+            data = (validate_video(read_regular(path, MAX_VIDEO_BYTES)) if mime == "video/mp4"
+                    else normalize(read_regular(path, MAX_ARTIFACT_BYTES), mime, MAX_ARTIFACT_BYTES))
         except (OSError, ValueError):
             if strict:
-                raise ArtifactError("Generated image failed format, size, or file safety validation; no result image was returned") from None
+                raise ArtifactError("Generated media failed format, size, or file safety validation; no result media was returned") from None
             continue
-        if total + len(data) > MAX_ARTIFACT_TOTAL:
+        if total + len(data) > MAX_MEDIA_TOTAL:
             if strict:
-                raise ArtifactError("Generated images exceed the total size limit; no result image was returned")
+                raise ArtifactError("Generated media exceed the total size limit; no result media was returned")
             continue
         if not archive.exists():
             archive.mkdir(mode=0o700, parents=True)
         if archive.is_symlink():
             raise ValueError("unsafe artifact archive")
         aid = str(len(artifacts))
-        name = "result-" + str(len(artifacts) + 1) + MIMES[mime][1]
-        private_write(archive / (aid + MIMES[mime][1]), data)
-        artifacts.append({"id": aid, "mime": mime, "name": name})
+        name = "result-" + str(len(artifacts) + 1) + ARTIFACT_MIMES[mime][1]
+        private_write(archive / (aid + ARTIFACT_MIMES[mime][1]), data)
+        artifacts.append({"id": aid, "mime": mime, "name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
         total += len(data)
     return artifacts
 
@@ -178,7 +215,10 @@ def artifact_payload(archive: Path, metadata: dict) -> dict:
     if archive.is_symlink() or not archive.is_dir():
         raise ValueError("artifact unavailable")
     aid, mime = metadata.get("id"), metadata.get("mime")
-    if aid not in {"0", "1", "2"} or mime not in MIMES:
+    if aid not in {"0", "1", "2"} or mime not in ARTIFACT_MIMES:
         raise ValueError("artifact unavailable")
-    data = read_regular(archive / (aid + MIMES[mime][1]), MAX_ARTIFACT_BYTES)
-    return {"mime": mime, "name": metadata["name"], "data": base64.b64encode(data).decode("ascii")}
+    data = read_regular(archive / (aid + ARTIFACT_MIMES[mime][1]), MAX_VIDEO_BYTES if mime == "video/mp4" else MAX_ARTIFACT_BYTES)
+    digest = hashlib.sha256(data).hexdigest()
+    if metadata.get("sha256", digest) != digest or metadata.get("size", len(data)) != len(data):
+        raise ValueError("artifact integrity check failed")
+    return {"mime": mime, "name": metadata["name"], "size": len(data), "sha256": digest, "data": base64.b64encode(data).decode("ascii")}

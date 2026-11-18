@@ -18,7 +18,7 @@ class Star:
 class Plain:
     def __init__(self, text): self.text = text
 class MessageChain:
-    def __init__(self, chain): self.chain = chain
+    def __init__(self, chain, use_markdown_=None): self.chain = chain; self.use_markdown = use_markdown_
 class FunctionTool:
     def __init__(self, **kwargs): self.__dict__.update(kwargs)
 class ToolSet:
@@ -49,6 +49,20 @@ class Event:
     def stop_event(self): self.stopped=True
     async def send(self,chain): self.sent.append(chain)
 class ParserTests(unittest.TestCase):
+    def test_memory_inventory_questions_are_read_only(self):
+        for text in ('告诉我现在你有哪些长期记忆', '我有哪些长期记忆？', '我现在有哪些长期记忆', '告诉我到底有哪些长期记忆',
+                     '请告诉我你都记住了什么？', '你记得我什么？', '我的长期记忆有哪些？',
+                     '你有哪些长期记忆？', '现在都有哪些长期记忆？', '列出所有长期记忆',
+                     '长期记忆里都保存了什么？'):
+            with self.subTest(text=text):
+                self.assertEqual(m._memory_intent(text), {'action': 'list', 'page': 1})
+        for text in ('长期记忆是什么？', '你能保存长期记忆吗？', '你有哪些长期记忆功能？',
+                     '告诉我张三有哪些长期记忆', '列出别人的长期记忆', '不要告诉我有哪些长期记忆',
+                     '例如：我有哪些长期记忆？', '他说：我有哪些长期记忆？', '“我有哪些长期记忆？”',
+                     '查看我的长期记忆，然后清空'):
+            with self.subTest(text=text):
+                self.assertIsNone(m._memory_intent(text))
+
     def test_suffix_memory_directive_keeps_only_current_facts(self):
         facts = '办公地点：合成园区甲楼。住处：合成社区乙区。'
         for ending in ('以上要加入长期记忆。', '上述信息都需要保存到我的长期记忆里', '这些内容请写入长期记忆'):
@@ -80,6 +94,11 @@ class ParserTests(unittest.TestCase):
           '删除关于饮料的记忆':{'action':'delete','target':'饮料'},
           '查看我的长期记忆':{'action':'list','page':1},
           '查看我的长期记忆第3页':{'action':'list','page':3},
+          '我有哪些长期记忆？':{'action':'list','page':1},
+          '我现在有哪些长期记忆':{'action':'list','page':1},
+          '告诉我到底有哪些长期记忆':{'action':'list','page':1},
+          '请告诉我有什么长期记忆':{'action':'list','page':1},
+          '你记得我什么':{'action':'list','page':1},
           '/记忆 list 3':{'action':'list','page':3},
           '确认清空长期记忆':{'action':'clear'},
           '清空我的长期记忆':{'action':'clear'},
@@ -108,6 +127,252 @@ class ParserTests(unittest.TestCase):
             with self.subTest(text=text): self.assertIsNotNone(m._SENSITIVE.search(text))
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def save_relationship(self, content, sender='A', group='qq:GroupMessage:family'):
+        private = 'qq:FriendMessage:viewer'
+        self.plugin.allowed_umos.update({group, private})
+        result = await self.op('记住' + content, sender=sender, umo=group)
+        self.assertTrue(result['ok'])
+        return Event('查看我的长期记忆', sender=sender, umo=private)
+
+    async def test_readable_four_person_graph_from_private_keeps_database_and_raw_snapshot(self):
+        raw = '本群人物关系：<@A>是<@B>的老公。<@C>是<@B>的爸爸。<@D>是<@A>的爸爸'
+        source = await self.save_relationship(raw)
+        before = self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall()
+        self.plugin.db.execute('PRAGMA query_only=ON')
+        result = await self.plugin._apply(source, 'list')
+        self.assertEqual(result['items'], [raw])
+        message = result['message']
+        self.assertIn('共 1 条', message)
+        self.assertNotIn('第 1/1 页', message)
+        self.assertIn('\n\n1. 本群人物关系：\n你与妻子是夫妻。\n已记录你的父亲、妻子的父亲。', message)
+        self.assertNotIn('<@', message)
+        self.assertNotIn('#1.', message)
+        exported = self.plugin.memory_snapshot_for_task(source)
+        self.assertEqual(exported['status'], 'ok')
+        self.assertEqual(exported['items'][0]['content'], raw)
+        self.assertEqual(exported['items'][0]['id'], before[0][0])
+        self.assertEqual(exported['items'][0]['display_content'], message.split('\n\n1. ', 1)[1])
+        self.assertNotIn('<@', exported['items'][0]['display_content'])
+        self.assertEqual(self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall(), before)
+        await self.plugin.explicit_memory_request(source)
+        self.assertIs(source.sent[0].use_markdown, False)
+        self.assertTrue(all(isinstance(part, Plain) for part in source.sent[0].chain))
+        self.plugin.db.execute('PRAGMA query_only=OFF')
+
+    async def test_reverse_spouse_fact_and_maternal_labels(self):
+        raw = '本群人物关系：<@B>是<@A>的老婆。<@C>是<@B>的母亲。<@D>是<@A>的妈妈。'
+        source = await self.save_relationship(raw)
+        message = (await self.plugin._apply(source, 'list'))['message']
+        self.assertIn('你与妻子是夫妻。', message)
+        self.assertIn('你的母亲、妻子的母亲', message)
+        other = await self.save_relationship('本群人物关系：<@A>是<@B>的老公。', sender='B', group='qq:GroupMessage:other')
+        self.assertIn('你与丈夫是夫妻。', (await self.plugin._apply(other, 'list'))['message'])
+
+    async def test_unknown_and_conflicting_relations_keep_distinct_members(self):
+        source = await self.save_relationship('本群人物关系：<@X>是<@Y>的父亲。')
+        message = (await self.plugin._apply(source, 'list'))['message']
+        self.assertIn('成员甲是成员乙的父亲', message)
+        self.assertNotIn('你的父亲', message)
+        await self.op('记住本群人物关系：<@A>是<@B>的老公。<@A>是<@C>的老公。<@D>是<@B>的爸爸。', sender='A', umo='qq:GroupMessage:family')
+        message = (await self.plugin._apply(source, 'list'))['message']
+        self.assertIn('存在冲突', message)
+        self.assertNotIn('你与妻子', message)
+        self.assertNotIn('妻子的父亲', message)
+        self.assertNotIn('<@', message)
+        self.assertIn('成员甲', message)
+        self.assertIn('成员乙', message)
+
+    async def test_conflicting_parents_never_receive_unique_parent_label(self):
+        source = await self.save_relationship('本群人物关系：<@C>是<@A>的爸爸。<@D>是<@A>的爸爸。')
+        message = (await self.plugin._apply(source, 'list'))['message']
+        self.assertIn('存在冲突', message)
+        self.assertIn('成员甲', message)
+        self.assertIn('成员乙', message)
+        self.assertNotIn('已记录你的父亲', message)
+
+    async def test_conflicting_spouse_and_parent_roles_use_member_codes(self):
+        source = await self.save_relationship('本群人物关系：<@A>是<@B>的老公。<@B>是<@A>的父亲。')
+        message = (await self.plugin._apply(source, 'list'))['message']
+        self.assertIn('存在冲突', message)
+        self.assertNotIn('你与妻子是夫妻', message)
+        self.assertIn('成员甲', message)
+        self.assertNotIn('<@', message)
+
+    async def test_parent_directed_cycles_fall_back_without_recursive_family_labels(self):
+        for raw in ('本群人物关系：<@B>是<@A>的父亲。<@A>是<@B>的父亲',
+                    '本群人物关系：<@B>是<@A>的爸爸。<@C>是<@B>的母亲。<@A>是<@C>的父亲'):
+            with self.subTest(raw=raw):
+                source = await self.save_relationship(raw)
+                result = await self.plugin._apply(source, 'list')
+                self.assertIn('存在冲突', result['message'])
+                self.assertIn('成员甲', result['message'])
+                self.assertNotIn('你是你的父亲的父亲', result['message'])
+                self.assertNotIn('已记录你的父亲', result['message'])
+                self.assertNotIn('<@', result['message'])
+                self.assertIn(raw, result['items'])
+
+    async def test_native_and_legacy_markup_share_readable_display_without_changing_raw(self):
+        raw = ('本群人物关系：<qqbot-at-user id="A" />是<@B>的老公。'
+               '<@C>是<qqbot-at-user id="B" />的爸爸。'
+               '<qqbot-at-user id="D" />是<@A>的爸爸')
+        source = await self.save_relationship(raw)
+        before = self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall()
+        result = await self.plugin._apply(source, 'list')
+        self.assertIn('你与妻子是夫妻。', result['message'])
+        self.assertIn('已记录你的父亲、妻子的父亲。', result['message'])
+        self.assertEqual(result['items'], [raw])
+        self.assertNotIn('qqbot-at-', result['message'])
+        self.assertNotIn('<@', result['message'])
+        snapshot = self.plugin.memory_snapshot_for_task(source)
+        self.assertEqual(snapshot['items'][0]['content'], raw)
+        self.assertNotIn('qqbot-at-', snapshot['items'][0]['display_content'])
+        self.assertEqual(self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall(), before)
+        await self.plugin.explicit_memory_request(source)
+        self.assertTrue(all(isinstance(part, Plain) for part in source.sent[0].chain))
+        self.assertIs(source.sent[0].use_markdown, False)
+
+    async def test_native_markup_in_prose_and_unknown_attributes_remain_plain(self):
+        source = await self.save_relationship('本群人物关系：<@A>是<@B>的老公')
+        raw = ('例如：<qqbot-at-user id="A" />说<qqbot-at-user id="B" />喜欢茶；'
+               '<qqbot-at-user id="B" extra="x" />与<qqbot-at-user id="all" />；<qqbot-at-all />')
+        await self.op('记住' + raw, sender='A', umo='qq:GroupMessage:family')
+        result = await self.plugin._apply(source, 'list')
+        self.assertIn('例如：你说成员甲喜欢茶', result['message'])
+        self.assertIn('QQ账号引用与QQ账号引用；QQ账号引用', result['message'])
+        self.assertNotIn('qqbot-at-', result['message'])
+        self.assertNotIn('id="', result['message'])
+        self.assertIn(raw, result['items'])
+
+    async def test_prose_only_replaces_mentions_and_ordinary_text_is_unchanged(self):
+        source = await self.save_relationship('本群人物关系：<@A>是<@B>的老公。')
+        prose = '例如：<@A>是<@B>的老公；<@C>说“<@B>喜欢茶”'
+        await self.op('记住' + prose, sender='A', umo='qq:GroupMessage:family')
+        ordinary = '普通偏好：早餐喝温豆浆，回答要简洁'
+        await self.op('记住' + ordinary, sender='A', umo='qq:GroupMessage:family')
+        result = await self.plugin._apply(source, 'list')
+        self.assertIn(ordinary, result['message'])
+        self.assertIn('例如：你是成员甲的老公；成员乙说“成员甲喜欢茶”', result['message'])
+        self.assertIn(prose, result['items'])
+        exported = self.plugin.memory_snapshot_for_task(source)
+        self.assertTrue(all('<@' not in item['display_content'] for item in exported['items']))
+
+    async def test_relationship_inference_stays_with_the_source_group(self):
+        source = await self.save_relationship('本群人物关系：<@A>是<@B>的老公。')
+        await self.save_relationship('本群人物关系：<@C>是<@B>的父亲。', group='qq:GroupMessage:other')
+        message = (await self.plugin._apply(source, 'list'))['message']
+        self.assertIn('你与妻子是夫妻。', message)
+        self.assertNotIn('妻子的父亲', message)
+        self.assertIn('成员乙是成员甲的父亲', message)
+
+    async def test_display_order_numbers_continue_across_pages_and_keep_blank_lines(self):
+        for index in range(7):
+            await self.op(f'记住合成事项{index}')
+        first = await self.op('/记忆 list 1')
+        second = await self.op('/记忆 list 2')
+        self.assertIn('第 1/2 页，共 7 条', first['message'])
+        self.assertIn('\n\n1. 合成事项6\n\n2. 合成事项5', first['message'])
+        self.assertIn('\n\n5. 合成事项2\n\n下一页：/记忆 list 2', first['message'])
+        self.assertIn('\n\n6. 合成事项1\n\n7. 合成事项0', second['message'])
+        self.assertNotIn('下一页', second['message'])
+        self.assertNotIn('#', first['message'])
+
+    async def test_relationship_reader_is_scoped_and_does_not_modify_memory(self):
+        origin = "qq:GroupMessage:family"
+        self.plugin.allowed_umos.update({origin, "qq:GroupMessage:foreign", "qq:FriendMessage:alice"})
+        source = Event("记住本群人物关系：<@alice> 是<@wife> 的老公", umo=origin)
+        await self.plugin.explicit_memory_request(source)
+        before = self.plugin._rows(self.plugin._owner(source))
+        request = Event("at 我老婆，告诉她准备好了", umo=origin)
+        self.assertEqual(self.plugin.saved_relationship_facts(request), [before[0][1]])
+        for denied in (Event("at 我老婆", sender="bob", umo=origin),
+                       Event("at 我老婆", umo="qq:GroupMessage:foreign"),
+                       Event("at 我老婆", umo="qq:FriendMessage:alice"),
+                       Event("at 我老婆", umo=origin, addressed=False)):
+            self.assertEqual(self.plugin.saved_relationship_facts(denied), [])
+        self.assertEqual(self.plugin._rows(self.plugin._owner(source)), before)
+        self.assertFalse(request.sent)
+
+    async def test_inventory_lists_every_saved_record_without_relevance_filter_or_write(self):
+        for i in range(12):
+            await self.op(f'记住合成事项{i}')
+        await self.op('记住其他用户的合成事项', sender='bob')
+        self.plugin.allowed_umos.add('synthetic-private')
+        await self.op('记住其他会话的合成事项', umo='synthetic-private')
+        before = self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall()
+        self.plugin.db.execute('PRAGMA query_only=ON')
+        collected = []
+        for page, text in enumerate(('告诉我到底有哪些长期记忆', '/记忆 list 2', '查看我的长期记忆第3页'), 1):
+            current = Event(text)
+            await self.plugin.explicit_memory_request(current)
+            self.assertTrue(current.stopped)
+            self.assertTrue(current.get_extra('long_term_memory_tool_done'))
+            self.assertEqual(len(current.sent), 1)
+            message = current.sent[0].chain[0].text
+            self.assertIn(f'第 {page}/3 页，共 13 条', message)
+            self.assertNotIn('其他用户', message)
+            collected.extend(line for line in message.splitlines() if __import__('re').match(r'^\d+\. ', line))
+            if page < 3:
+                self.assertIn(f'/记忆 list {page + 1}', message)
+        self.assertEqual(len(collected), 13)
+        self.assertEqual(len(set(collected)), 13)
+        self.assertEqual(self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall(), before)
+        self.plugin.db.execute('PRAGMA query_only=OFF')
+
+    async def test_inventory_from_private_session_reads_same_sender_authorized_group_records(self):
+        self.plugin.allowed_umos.add('synthetic-private')
+        await self.op('记住群里的合成偏好')
+        private = Event('告诉我你现在有哪些长期记忆', umo='synthetic-private')
+        await self.plugin.explicit_memory_request(private)
+        self.assertTrue(private.stopped)
+        self.assertIn('共 1 条', private.sent[0].chain[0].text)
+        self.assertIn('群里的合成偏好', private.sent[0].chain[0].text)
+        self.assertEqual(self.plugin._rows(self.plugin._owner(private)), [])
+
+    async def test_inventory_paginates_over_100_records_across_two_sessions_and_refuses_overflow(self):
+        self.plugin.allowed_umos.add('synthetic-private')
+        group_owner = self.plugin._owner(Event())
+        private_owner = self.plugin._owner(Event(umo='synthetic-private'))
+        expected = []
+        for owner, prefix in ((group_owner, 'group'), (private_owner, 'private')):
+            for index in range(70):
+                content = f'{prefix} synthetic memory {index}'
+                expected.append(content)
+                self.plugin.db.execute(
+                    'INSERT INTO memories(owner,content,normalized,created_at,updated_at) VALUES(?,?,?,?,?)',
+                    (owner, content, content, index, index))
+        self.plugin.db.commit()
+        before = self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall()
+        self.plugin.db.execute('PRAGMA query_only=ON')
+        actual = []
+        for page in range(1, 29):
+            result = await self.op(f'/记忆 list {page}', umo='synthetic-private')
+            self.assertTrue(result['ok'])
+            self.assertEqual((result['total'], result['pages'], result['page']), (140, 28, page))
+            self.assertEqual(len(result['items']), 5)
+            actual.extend(result['items'])
+        self.assertCountEqual(actual, expected)
+        self.assertEqual(len(set(actual)), 140)
+        self.assertEqual(self.plugin.db.execute('SELECT * FROM memories ORDER BY id').fetchall(), before)
+        self.plugin.db.execute('PRAGMA query_only=OFF')
+        # Simulate legacy/imported rows exceeding the supported snapshot cap.
+        # A successful result must never quietly advertise a partial total.
+        for index in range(61):
+            content = f'overflow synthetic memory {index}'
+            self.plugin.db.execute(
+                'INSERT INTO memories(owner,content,normalized,created_at,updated_at) VALUES(?,?,?,?,?)',
+                (group_owner, content, content, index, index))
+        self.plugin.db.commit()
+        self.plugin.db.execute('PRAGMA query_only=ON')
+        result = await self.op('/记忆 list 1', umo='synthetic-private')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'too_many_records')
+        self.assertEqual(result['items'], [])
+        self.assertIsNone(result['total'])
+        self.assertIn('无法返回完整清单', result['message'])
+        self.assertEqual(self.plugin.db.execute('SELECT COUNT(*) FROM memories').fetchone()[0], 201)
+        self.plugin.db.execute('PRAGMA query_only=OFF')
+
+
     async def test_location_aliases_retrieve_without_literal_overlap(self):
         content = '公司在合成园区甲楼。家在合成社区乙区'
         await self.op('记住' + content)

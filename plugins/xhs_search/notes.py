@@ -8,7 +8,7 @@ import ipaddress
 import re
 import socket
 import time
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 import warnings
 
 import httpx
@@ -23,6 +23,34 @@ MAX_IMAGES = 4
 MAX_NOTES = 3
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_PIXELS = 24000000
+
+
+def note_links(text: str) -> tuple[list[str], dict]:
+    identifiers, references = [], {}
+    for match in re.finditer(r"https?://[^\s<>\"'`，。；：！？（）【】\u3400-\u9fff]+", text[:18000], re.I):
+        value = match.group().rstrip(".,;:!?)]}")
+        if len(value) > 4096 or re.search(r"[\x00-\x20\x7f\\]", value):
+            continue
+        try:
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or parsed.hostname not in {"www.xiaohongshu.com", "xiaohongshu.com"}
+                    or parsed.username is not None or parsed.password is not None or parsed.port not in (None, 443)):
+                continue
+            path = re.fullmatch(r"/(?:explore|discovery/item)/([A-Za-z0-9_-]{1,128})/?", parsed.path)
+            if path is None:
+                continue
+            identifier = path[1]
+            if identifier not in identifiers:
+                if len(identifiers) >= 10:
+                    continue
+                identifiers.append(identifier)
+            parameters = parse_qs(parsed.query.replace("+", "%2B"), keep_blank_values=True, max_num_fields=40)
+            tokens = parameters.get("xsec_token", [])
+            if len(tokens) == 1 and re.fullmatch(r"[A-Za-z0-9+/_=-]{1,2048}", tokens[0]):
+                references.setdefault(identifier, {"feed_id": identifier, "xsec_token": tokens[0]})
+        except ValueError:
+            continue
+    return identifiers, references
 
 
 def image_url(value: object) -> str:

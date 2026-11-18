@@ -1,0 +1,47 @@
+{
+  "allowed_umos": {
+    "description": "允许闲鱼查询、监控及共享列表/详情/管理的精确 QQ UMO；当前操作人及监控原会话都须仍获授权，空列表拒绝",
+    "type": "list",
+    "default": []
+  },
+  "allowed_senders": {
+    "description": "可选发送者白名单",
+    "type": "list",
+    "default": []
+  },
+  "login_umos": {
+    "description": "允许闲鱼登录操作的精确QQ群聊/私聊UMO；共享成员模式内所有成员可操作，否则按login_senders校验",
+    "type": "list",
+    "default": []
+  },
+  "login_senders": {
+    "description": "shared_login_members=false 时允许在已授权群聊或私聊操作登录的精确 QQ 发送者 ID；空列表拒绝登录",
+    "type": "list",
+    "default": []
+  },
+  "endpoint": {
+    "description": "闲鱼本机服务地址",
+    "type": "string",
+    "default": "http://127.0.0.1:18070"
+  },
+  "api_token_file": {
+    "description": "API token文件",
+    "type": "string",
+    "default": "/etc/xianyu/api-token"
+  },
+  "state_file": {
+    "description": "监控持久化文件",
+    "type": "string",
+    "default": "/var/lib/astrbot/data/plugins/xianyu_watch/watches.json"
+  },
+  "shared_login_members": {
+    "description": "已授权 login_umos 内的成员共享闲鱼登录操作权限；保持精确会话白名单",
+    "type": "bool",
+    "default": true
+  },
+  "send_product_images": {
+    "description": "即时商品查询和新商品提醒是否附商品图片；不影响扫码登录二维码",
+    "type": "bool",
+    "default": false
+  }
+}

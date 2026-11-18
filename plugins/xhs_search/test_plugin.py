@@ -67,6 +67,7 @@ modules = {
     "astrbot.core.star": types.ModuleType("astrbot.core.star"),
     "astrbot.core.star.filter": types.ModuleType("astrbot.core.star.filter"),
     "astrbot.core.star.filter.command": types.ModuleType("astrbot.core.star.filter.command"),
+    "astrbot.core.pipeline.preprocess_stage.voice_input": types.ModuleType("astrbot.core.pipeline.preprocess_stage.voice_input"),
 }
 modules["astrbot.api"].star = star
 modules["astrbot.api.event"].AstrMessageEvent = object
@@ -76,6 +77,9 @@ modules["astrbot.api.message_components"].Plain = _Plain
 modules["astrbot.api.message_components"].Image = _Image
 modules["astrbot.api.message_components"].Reply = _Reply
 modules["astrbot.core.star.filter.command"].GreedyStr = str
+modules["astrbot.core.pipeline.preprocess_stage.voice_input"].get_voice_input_text = (
+    lambda event: event.get_extra("voice_input_transcript") if event.get_extra("voice_input_transcribed") else ""
+)
 sys.modules.update(modules)
 
 
@@ -138,6 +142,40 @@ class ToolSet:
 
 
 class Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_gets_source_without_preselected_image_downloads(self):
+        instance = self.make()
+        event = Event("https://www.xiaohongshu.com/discovery/item/synthetic-note?xsec_token=synthetic-access")
+        source = {"data": {"note": {"video": {"media": {"stream": {}}, "subtitles": {"source": "zh-CN"}}}}}
+        note = {"note_id": "synthetic-note", "title": "Synthetic", "body": "正文", "kind": "video",
+                "image_urls": ["https://sns-webpic-qc.xhscdn.com/synthetic-cover"], "source": source}
+        trusted = lambda current, tool: current is event and tool == plugin.NOTES_TOOL_NAME
+        with patch.object(instance, "_call", new=AsyncMock(return_value=note)) as call, patch.object(
+            plugin, "download_image", new=AsyncMock()
+        ) as download:
+            result = await instance.semantic_read_notes(event, include_images=False, _codex_call=trusted)
+        document = json.loads(next(item.text for item in result.content if item.type == "text"))
+        call.assert_awaited_once_with("note_detail", feed_id="synthetic-note", xsec_token="synthetic-access", include_source=True)
+        download.assert_not_awaited()
+        self.assertEqual(document["notes"][0]["source"], source)
+        self.assertEqual(document["image_count"], 0)
+        self.assertIn("未自动下载视频或字幕", document["notice"])
+        self.assertNotIn("仅读取文案和封面", document["notice"])
+        self.assertEqual(event.sent, [])
+
+    async def test_source_is_not_publicly_selectable_and_image_flag_is_validated(self):
+        instance = self.make()
+        event = Event("https://www.xiaohongshu.com/discovery/item/synthetic-note?xsec_token=synthetic-access")
+        self.assertNotIn("include_source", plugin.NOTES_SCHEMA["properties"])
+        trusted = lambda current, tool: current is event and tool == plugin.NOTES_TOOL_NAME
+        with patch.object(instance, "_call", new=AsyncMock()) as call:
+            for value in (None, "false", 1, []):
+                result = json.loads(await instance.semantic_read_notes(event, include_images=value, _codex_call=trusted))
+                self.assertEqual(result["code"], "notes_invalid")
+            denied = Event(event.parts[0].text, umo="qq_official:GroupMessage:other")
+            result = json.loads(await instance.semantic_read_notes(denied, include_images=False, _codex_call=lambda *args: True))
+            self.assertEqual(result["code"], "not_authorized")
+        call.assert_not_awaited()
+
     def make(self):
         return plugin.Main(None, {
             "allowed_umos": ["qq_official:GroupMessage:g"],
@@ -412,6 +450,127 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         request = await self.install_tool(p, event)
         self.assertEqual([tool.name for tool in request.func_tool.tools], [plugin.STATUS_TOOL_NAME])
         self.assertFalse(json.loads(await p.semantic_search(event, "cats"))["ok"])
+
+    async def test_direct_shared_video_link_reads_without_prior_search_or_login(self):
+        instance = self.make()
+        event = Event("https://www.xiaohongshu.com/discovery/item/synthetic-note?type=video&xsec_token=synthetic-shared-access\n给我总结下")
+        await instance.natural_search(event)
+        self.assertTrue(event.get_extra("xhs_notes_request"))
+        request = await self.install_tool(instance, event)
+        tool = next(item for item in request.func_tool.tools if item.name == plugin.NOTES_TOOL_NAME)
+        note = {"note_id": "synthetic-note", "title": "合成视频", "body": "合成文案", "kind": "video", "image_urls": []}
+        with patch.object(instance, "_call", new=AsyncMock(return_value=note)) as call:
+            result = await tool.handler(event, note_ids=["synthetic-note"])
+            repeated = await tool.handler(event, note_ids=["synthetic-note"])
+        document = json.loads(next(item.text for item in result.content if item.type == "text"))
+        self.assertTrue(document["ok"])
+        self.assertEqual(document["notes"][0]["body"], "合成文案")
+        self.assertIn("未读取视频画面或音轨", document["notice"])
+        self.assertNotIn("synthetic-shared-access", json.dumps(document))
+        self.assertIs(repeated, result)
+        call.assert_awaited_once_with("note_detail", feed_id="synthetic-note", xsec_token="synthetic-shared-access")
+        self.assertEqual(event.sent, [])
+        with self.assertRaises(core.XHSError):
+            instance._note_references.get(instance._event_identity(event))
+
+    async def test_shared_link_prioritizes_direct_message_over_old_quote_and_query(self):
+        instance = self.make()
+        event = Event("总结 https://www.xiaohongshu.com/explore/direct-note?xsec_token=direct-access")
+        event.parts.append(_Reply("小红书搜索：旧结果\nhttps://www.xiaohongshu.com/explore/old-note?xsec_token=old-access"))
+        await self.install_tool(instance, event)
+        note = {"note_id": "direct-note", "title": "当前笔记", "body": "正文", "image_urls": []}
+        with patch.object(instance, "_call", new=AsyncMock(return_value=note)) as call:
+            denied = json.loads(await instance.semantic_read_notes(event, note_ids=["old-note"]))
+            self.assertEqual(denied["code"], "notes_unauthorized")
+            call.assert_not_awaited()
+            result = await instance.semantic_read_notes(event, query="不要搜索其他结果")
+        self.assertFalse(result.isError)
+        call.assert_awaited_once_with("note_detail", feed_id="direct-note", xsec_token="direct-access")
+
+    async def test_explicit_summary_can_read_quoted_share_without_search(self):
+        instance = self.make()
+        event = Event("给我总结下")
+        event.parts.append(_Reply("https://www.xiaohongshu.com/discovery/item/quoted-note?xsec_token=quoted-access"))
+        await self.install_tool(instance, event)
+        note = {"note_id": "quoted-note", "title": "引用笔记", "body": "正文", "image_urls": []}
+        with patch.object(instance, "_call", new=AsyncMock(return_value=note)) as call:
+            result = await instance.semantic_read_notes(event)
+        self.assertFalse(result.isError)
+        call.assert_awaited_once_with("note_detail", feed_id="quoted-note", xsec_token="quoted-access")
+
+    async def test_shared_link_missing_access_is_not_reported_as_login_failure(self):
+        instance = self.make()
+        event = Event("https://www.xiaohongshu.com/discovery/item/synthetic-note\n给我总结下")
+        await self.install_tool(instance, event)
+        with patch.object(instance, "_call", new=AsyncMock()) as call:
+            result = json.loads(await instance.semantic_read_notes(event, note_ids=["synthetic-note"]))
+        self.assertEqual(result["code"], "note_reference_unavailable")
+        self.assertIn("完整分享链接", result["error"])
+        self.assertIn("不是账号未登录", result["error"])
+        call.assert_not_awaited()
+
+    async def test_link_without_access_can_reuse_only_current_owners_search_reference(self):
+        instance = self.make()
+        event = Event("总结 https://www.xiaohongshu.com/explore/synthetic-note")
+        instance._note_references.put(instance._event_identity(event), "旧搜索", {
+            "synthetic-note": {"feed_id": "synthetic-note", "xsec_token": "search-access"},
+        })
+        await self.install_tool(instance, event)
+        note = {"note_id": "synthetic-note", "title": "搜索笔记", "body": "正文", "image_urls": []}
+        with patch.object(instance, "_call", new=AsyncMock(return_value=note)) as call:
+            result = await instance.semantic_read_notes(event)
+            self.assertFalse(result.isError)
+            foreign = Event(event.parts[0].text, sender="other")
+            await self.install_tool(instance, foreign)
+            denied = json.loads(await instance.semantic_read_notes(foreign))
+        self.assertEqual(denied["code"], "note_reference_unavailable")
+        call.assert_awaited_once_with("note_detail", feed_id="synthetic-note", xsec_token="search-access")
+
+    async def test_link_or_quoted_instruction_alone_does_not_grant_read_intent(self):
+        instance = self.make()
+        link = "https://www.xiaohongshu.com/discovery/item/synthetic-note?xsec_token=synthetic-access"
+        for text in (link, link + "&title=总结小红书", link + "\n不要总结", link + "\n例如给我总结下",
+                     link + "\n开发总结插件", "> " + link + "\n给我总结下"):
+            with self.subTest(text=text):
+                event = Event(text)
+                self.assertFalse(instance._notes_requested(event))
+                await self.install_tool(instance, event)
+                with patch.object(instance, "_call", new=AsyncMock()) as call:
+                    result = json.loads(await instance.semantic_read_notes(event))
+                self.assertFalse(result["ok"])
+                self.assertIn(result["code"], {"not_authorized", "notes_intent_required"})
+                call.assert_not_awaited()
+        event = Event("这是什么")
+        event.parts.append(_Reply(link + "\n给我总结下"))
+        self.assertFalse(instance._notes_requested(event))
+
+    async def test_shared_link_preserves_event_sender_and_allowlist_authorization(self):
+        instance = self.make()
+        text = "https://www.xiaohongshu.com/discovery/item/synthetic-note?xsec_token=synthetic-access\n给我总结下"
+        original = Event(text)
+        await self.install_tool(instance, original)
+        copied = Event(text)
+        copied.extras = dict(original.extras)
+        wrong_group = Event(text, umo="qq_official:GroupMessage:foreign")
+        not_addressed = Event(text)
+        not_addressed.is_at_or_wake_command = False
+        changed_sender = Event(text)
+        await self.install_tool(instance, changed_sender)
+        changed_sender.sender = "changed"
+        with patch.object(instance, "_call", new=AsyncMock()) as call:
+            for event in (copied, wrong_group, not_addressed, changed_sender):
+                denied = json.loads(await instance.semantic_read_notes(event))
+                self.assertEqual(denied["code"], "not_authorized")
+        call.assert_not_awaited()
+
+    async def test_voice_input_keeps_existing_note_authorization_behavior(self):
+        instance = self.make()
+        event = Event("")
+        event.set_extra("voice_input_transcribed", True)
+        event.set_extra("voice_input_transcript", "给我总结小红书笔记")
+        await self.install_tool(instance, event)
+        self.assertTrue(instance._notes_requested(event))
+        self.assertTrue(instance._semantic_authorized(event))
 
     async def test_search_refresh_returns_continuation_before_reading_note(self):
         instance = self.make()

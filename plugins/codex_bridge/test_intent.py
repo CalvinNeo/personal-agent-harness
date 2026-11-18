@@ -31,7 +31,7 @@ EXPLICIT_READ_ONLY = (
     "Use Codex to compare these three implementation options.",
     "Please ask Codex to review this function for race conditions.",
     "用 codex 来标注，要求看刚才和你说的",
-    "@calvin的智能体 用 codex 来标注，要求看刚才和你说的&#x20;",
+    "@示例的智能体 用 codex 来标注，要求看刚才和你说的&#x20;",
     "用 codex 处理：这个图，给我标注一下到底都是什么东西。你要真实对每个都搜一下用途，而不能只是翻译。标注完毕把图发我",
     "让 Codex 给这份方案加标签并整理说明",
     "请用 Codex 在图上圈出并高亮重点",

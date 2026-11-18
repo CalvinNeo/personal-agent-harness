@@ -163,8 +163,10 @@ def requested_lead(text: str) -> int:
 
 
 def validate_items(items, advance_minutes, *, text: str, now: float,
-                   min_delay: float, max_delay: float, max_text: int):
-    if type(advance_minutes) is not int or advance_minutes != requested_lead(text):
+                   min_delay: float, max_delay: float | None, max_text: int, check_requested_lead: bool = True):
+    if type(advance_minutes) is not int or not 0 <= advance_minutes <= 10080:
+        raise ValueError("提前分钟数必须是0至10080之间的整数。")
+    if check_requested_lead and advance_minutes != requested_lead(text):
         raise ValueError("提前分钟数与用户原始要求不一致，请使用用户明确指定的提前时间。")
     if not isinstance(items, list) or not 1 <= len(items) <= 10:
         raise ValueError("一次请提供1至10条日程。")
@@ -187,8 +189,8 @@ def validate_items(items, advance_minutes, *, text: str, now: float,
         due = start - advance_minutes * 60
         if due - now < min_delay:
             raise ValueError("提前后的提醒时间已过或太近，请向用户说明并确认新的提醒时间，不要自动改到明天。")
-        if due - now > max_delay:
-            raise ValueError("提醒时间不能超过7天，请缩小日程范围。")
+        if max_delay is not None and due - now > max_delay:
+            raise ValueError("提醒时间超过当前配置允许的范围，请缩小日程范围。")
         key = (due, content.strip())
         if key not in seen:
             seen.add(key)

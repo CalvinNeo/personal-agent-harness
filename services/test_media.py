@@ -85,7 +85,9 @@ class MediaTests(unittest.TestCase):
             (output / "d-valid.png").write_bytes(png())
             (output / "e-directory.png").mkdir()
             artifacts = m.collect_artifacts(workspace, root / "archive")
-            self.assertEqual(artifacts, [{"id": "0", "mime": "image/png", "name": "result-1.png"}])
+            self.assertEqual([{key: item[key] for key in ("id", "mime", "name")} for item in artifacts],
+                             [{"id": "0", "mime": "image/png", "name": "result-1.png"}])
+            self.assertEqual(artifacts[0]["size"], (root / "archive" / "0.png").stat().st_size)
             payload = m.artifact_payload(root / "archive", artifacts[0])
             raw = base64.b64decode(payload["data"])
             self.assertNotIn(b"metadata-should-not-survive", raw)

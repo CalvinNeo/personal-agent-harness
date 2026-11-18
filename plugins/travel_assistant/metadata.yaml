@@ -1,5 +1,5 @@
 name: travel_assistant
-version: 1.0.0
+version: 1.0.1
 author: local
 repo: local
 desc: Read-only maps/navigation links, 12306 rail search, public flight offers and strict filtering.

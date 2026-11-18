@@ -1,5 +1,7 @@
 import asyncio
 import base64
+from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import os
@@ -24,6 +26,8 @@ from astrbot.core.utils import media_utils
 
 sys.path.insert(0, os.environ.get("XHS_PLUGIN_ROOT", str(Path(__file__).resolve().parents[1] / "plugins")))
 from codex_bridge.main import Main as Codex
+from codex_bridge.capabilities import CapabilityRegistry
+from codex_bridge.core import owner_key
 from xhs_search.main import Main as XHS
 from xhs_search.notes import validate_image
 
@@ -59,6 +63,90 @@ async def invoke(tool, source, **arguments):
 def passed(text):
     CHECKS.append(text)
     print("PASS " + text, flush=True)
+
+
+async def shared_link_checks():
+    text = "https://www.xiaohongshu.com/discovery/item/synthetic-note?type=video&xsec_token=synthetic-shared-access\n给我总结下"
+    source = event(text)
+    context = SimpleNamespace(send_message=AsyncMock(side_effect=AssertionError("QQ transport disabled")), get_all_stars=lambda: [])
+    plugin = XHS(context, {"allowed_umos": [source.unified_msg_origin]})
+    context.get_all_stars = lambda: [SimpleNamespace(name="xhs_search", activated=True, star_cls=plugin)]
+    note = {"note_id": "synthetic-note", "title": "合成视频笔记", "body": "已读取的合成文案", "kind": "video",
+            "url": "https://www.xiaohongshu.com/explore/synthetic-note", "image_urls": []}
+    plugin._call = AsyncMock(side_effect=lambda *args, **kwargs: dict(note))
+    direct = Codex(context, {"allowed_umos": [source.unified_msg_origin]})
+    direct._rpc = AsyncMock(side_effect=AssertionError("unexpected runner submission"))
+    source.set_extra("intent_router_timeout", {"event": id(source),
+        "owner": owner_key(source.unified_msg_origin, source.get_sender_id()), "text": hashlib.sha256(text.encode()).hexdigest()})
+    await plugin.natural_search(source)
+    await direct.natural_status(source)
+    request = ProviderRequest(prompt=text)
+    await plugin.provide_search_tool(source, request)
+    result, _ = await invoke(request.func_tool.get_tool("xhs_read_notes"), source, note_ids=["synthetic-note"])
+    assert result["ok"] and result["notes"][0]["body"] == note["body"]
+    assert "未读取视频画面或音轨" in result["notice"]
+    assert "synthetic-shared-access" not in json.dumps(result)
+    plugin._call.assert_awaited_once_with("note_detail", feed_id="synthetic-note", xsec_token="synthetic-shared-access")
+    direct._rpc.assert_not_awaited()
+    source.send.assert_not_awaited()
+    passed("direct shared video URL plus summary bypasses stale search references; timeout-marked ordinary route reads body without login")
+
+    wrapped = event("/codex " + text)
+    registry = await CapabilityRegistry(context, wrapped, task_text=text).prepare()
+    wrapped_result = await registry.execute("xhs_read_notes", {"note_ids": ["synthetic-note"]}, "wrapped-read")
+    document = json.loads(next(part["text"] for part in wrapped_result["_mcp_result"]["content"] if part["type"] == "text"))
+    assert document["ok"] and registry.event is not wrapped
+    wrapped.send.assert_not_awaited()
+    passed("explicit Codex wrapper preserves direct share reference after normalized event restoration")
+
+    with tempfile.TemporaryDirectory(prefix="xhs-handoff-", dir=Path(os.environ["XHS_REPORT"]).parent) as directory:
+        bridge = Codex(context, {"allowed_umos": [source.unified_msg_origin]})
+        bridge.routes_file = Path(directory) / "jobs.json"
+        submitted, results, pending = [], [], []
+
+        async def rpc(payload):
+            if payload["op"] == "submit":
+                submitted.append(payload)
+                now = datetime.now(timezone.utc).isoformat()
+                job = {"id": payload["job_id"], "state": "running", "mode": "read-only", "phase": "running",
+                       "owner": payload["owner"], "created_at": now, "started_at": now, "last_event_at": now,
+                       "heartbeat_at": now, "conversation_id": payload["job_id"], "artifacts": []}
+                return {"ok": True, "job": job}
+            if payload["op"] == "tool_pending":
+                return {"ok": True, "calls": pending}
+            if payload["op"] == "tool_result":
+                results.append(payload["result"])
+                return {"ok": True}
+            raise AssertionError("unexpected runner operation")
+
+        bridge._rpc = AsyncMock(side_effect=rpc)
+        fallback = event(text)
+        fallback.set_extra("intent_router_timeout", {"event": id(fallback),
+            "owner": owner_key(fallback.unified_msg_origin, fallback.get_sender_id()), "text": hashlib.sha256(text.encode()).hexdigest()})
+        await bridge.natural_status(fallback)
+        assert len(submitted) == 1 and fallback.get_extra("codex_timeout_submitted")
+        assert "xhs_read_notes" in {tool["name"] for tool in submitted[0]["capability_tools"]}
+        route = bridge.routes[submitted[0]["job_id"]]
+        pending.append({"call_id": "1" * 32, "name": "xhs_read_notes", "arguments": {"note_ids": ["synthetic-note"]}})
+        await bridge._service_tool_calls(route)
+        assert len(results) == 1 and results[0]["_mcp_result"]["isError"] is False
+        assert route["tool_receipts"]["1" * 32]["state"] == "complete"
+        passed("real timeout-to-Codex submission and broker tool receipt accept the original shared link")
+
+        restarted = Codex(context, bridge.config)
+        restarted.routes_file = bridge.routes_file
+        restarted._rpc = AsyncMock(side_effect=rpc)
+        restarted._load()
+        pending[:] = [{"call_id": "2" * 32, "name": "xhs_read_notes", "arguments": {"note_ids": ["synthetic-note"]}}]
+        before = plugin._call.await_count
+        await restarted._service_tool_calls(restarted.routes[route["id"]])
+        assert plugin._call.await_count == before + 1 and len(results) == 2
+        assert results[1]["_mcp_result"]["isError"] is False
+        assert "synthetic-shared-access" not in json.dumps(results)
+        context.send_message.assert_not_awaited()
+        await restarted.terminate()
+        await bridge.terminate()
+        passed("restarted broker rehydrates original share parameters and authorization without prior search or credential output")
 
 
 async def main():
@@ -182,6 +270,7 @@ async def main():
     budget_event.send.assert_not_awaited()
     passed("slow note read uses 66 seconds remaining after 34-second search; total 105-second budget remains bounded")
 
+    await shared_link_checks()
     target = Path(os.environ["XHS_REPORT"])
     report = {"ok": True, "real_framework": True, "provider_network": False, "qq_messages_sent": 0, "checks": CHECKS, "count": len(CHECKS)}
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")

@@ -13,7 +13,7 @@
 | 普通聊天 | 网页搜索和来源链接默认开启；不显示推理／工具内部状态，不启用 Computer Use | `scripts/initialize_private.py` |
 | 图片上下文 | 30 分钟 TTL、2 分钟隐式追问、12 张／scope、最多 64 scopes、0600 原子快照恢复 | `image_context_config.json.example`、插件常量 |
 | 长期记忆 | SQLite、最多 100 条／scope、每条 1000 字符、明确操作才写；授权群和私聊早于前置处理 | `long_term_memory_config.json.example` |
-| 提醒 | 北京时间、最短 5 秒、最长 7 天、每群 20／每人 10、文字与图片日程、多条和提前量 | `reminder_config.json.example`、`schedule_tools.py` |
+| 提醒 | 北京时间、最短 5 秒、不设固定未来日期上限、每群 20／每人 10、文字与图片日程、多条和提前量 | `reminder_config.json.example`、`schedule_tools.py` |
 | 小红书 | 本机服务、90 秒请求、5 条搜索；分步读 3 篇、最多 4 张原图，105 秒读取预算 | `xhs_search_config.json.example`、`notes.py`、`main.py` |
 | 出行 | 12306、单程 1 成人经济舱公开报价、20 分钟连续筛选；机票使用固定回环代理 | `travel_assistant_config.json.example` |
 | 高铁默认筛选 | G／D／C、二等座、明确有票；最多核价 24 班、3 并发，最多缓存 600 项 | `travel_assistant/core.py`、`providers.py` |
@@ -24,3 +24,7 @@
 `allowed_umos=[]` 拒绝插件全部会话；`allowed_senders=[]` 只表示在已授权会话内不再细分用户；`write_senders=[]` 拒绝写入。小红书登录须同时匹配精确授权私聊和发送者。AstrBot 主白名单空列表会放行所有会话，所以初始化保留拒绝占位值，不得直接清空。
 
 机票／公开图片模板依赖已有 `http://127.0.0.1:7890` 代理，没有代理就移除相应可选项并接受直连能力限制；不附带代理订阅、私人节点或自动绕过限流逻辑。工作区名和插件只读入口是可移植的通用别名，部署时统一替换，现有机器不自动迁移。
+
+Codex 任务在所有已授权 UMO 之间共享列表、状态、结果、附件及原生续接；每轮工具仍绑定当前提问者。失败回传后最多自动重试一次，可信任务可创建有数量与深度上限的独立子任务。会话保留数据 64 MiB、临时媒体 256 MiB、合计 320 MiB，全局 2 GiB。
+
+闲鱼的授权列表默认留空，已授权群和私聊可扫码；默认每 30 分钟监控新商品，仅发送名称、价格和链接，保留登录二维码。详见 [XIANYU](XIANYU.md)。可选语音转写见 [VOICE](VOICE.md)。

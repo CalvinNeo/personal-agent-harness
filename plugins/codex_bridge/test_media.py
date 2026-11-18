@@ -162,6 +162,57 @@ class Tests(unittest.IsolatedAsyncioTestCase):
             await media.prepare_images(Event(Plain("刚才那张图"), sender="bob"), context)
         self.assertNotIn("secret", str(error.exception))
 
+    async def test_foreign_plugin_error_codes_preserve_safe_actionable_reasons(self):
+        # AstrBot can load the image plugin under a different module name.
+        # Its exception identity and free-form messages are not our contract.
+        class ForeignImageReferenceError(ValueError):
+            def __init__(self, code):
+                self.code = code
+                self.user_message = "https://gchat.qpic.cn/private?token=secret"
+                super().__init__("/private/images/sensitive.png")
+
+        for code, expected in (("cache_missing", "直接引用原始图片消息"),
+                               ("count_mismatch", "数量超过"),
+                               ("ambiguous", "多个图片引用"),
+                               ("denied", "无权读取"),
+                               ("unavailable", "已不可用"),
+                               ("count_out_of_range", "数量超出允许范围")):
+            with self.subTest(code=code):
+                selector = AsyncMock(side_effect=ForeignImageReferenceError(code))
+                context = types.SimpleNamespace(get_all_stars=lambda: [types.SimpleNamespace(
+                    name="image_context", activated=True,
+                    star_cls=types.SimpleNamespace(select_for_task=selector))])
+                with self.assertRaisesRegex(media.ContextError, expected) as error:
+                    await media.prepare_images(Event(Plain("让 Codex 看刚才那张图")), context)
+                self.assertNotIn("secret", str(error.exception))
+                self.assertNotIn("/private", str(error.exception))
+                self.assertNotIn("https://", str(error.exception))
+                if code == "cache_missing":
+                    self.assertEqual(str(error.exception), "当前未收到你在这个会话里可用的图片；请直接引用原始图片消息并 @我，或把图片和 @ 放在同一条消息重发。")
+
+    async def test_unknown_cache_errors_do_not_expose_sensitive_text_or_custom_messages(self):
+        secret = "https://gchat.qpic.cn/private?token=secret /private/images/original.png"
+        plain = ValueError(secret)
+        unknown = ValueError(secret)
+        unknown.code, unknown.user_message = secret, secret
+        malformed = ValueError(secret)
+        malformed.code, malformed.user_message = ["cache_missing"], secret
+        for failure in (plain, unknown, malformed):
+            with self.subTest(code=getattr(failure, "code", None)):
+                selector = AsyncMock(side_effect=failure)
+                context = types.SimpleNamespace(get_all_stars=lambda: [types.SimpleNamespace(
+                    name="image_context", activated=True,
+                    star_cls=types.SimpleNamespace(select_for_task=selector))])
+                with self.assertRaises(media.ContextError) as error:
+                    await media.prepare_images(Event(Plain("让 Codex 看刚才那张图")), context)
+                self.assertEqual(str(error.exception), "图片上下文暂时不可用，请重新附上原图。")
+                self.assertNotIn("secret", str(error.exception))
+
+    async def test_malformed_cache_result_preserves_service_error(self):
+        selector = AsyncMock(return_value=[object()])
+        with self.assertRaisesRegex(media.ContextError, "服务返回无效数据"):
+            await media._select_cache(Event(), selector)
+
     async def test_selector_cannot_inject_old_images_outside_current_attachments(self):
         selector = AsyncMock(return_value=["https://attacker.invalid/old.png"])
         context = types.SimpleNamespace(get_all_stars=lambda: [types.SimpleNamespace(name="image_context", activated=True, star_cls=types.SimpleNamespace(select_for_task=selector))])

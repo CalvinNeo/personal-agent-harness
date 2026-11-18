@@ -28,7 +28,8 @@ def build_config(password: str, api_base: str, model: str, search: bool) -> dict
         },
         "platform": [{"id": "private_qq_bot", "type": "qq_official", "enable": False,
                       "appid": "", "secret": "", "enable_group_c2c": True,
-                      "enable_guild_direct_message": False, "use_markdown": False}],
+                      "enable_guild_direct_message": False, "use_markdown": False,
+                      "text_mention_aliases": []}],
         "platform_settings": {
             "unique_session": False, "enable_id_white_list": True,
             "id_whitelist": ["__deny_all_until_configured__"], "id_whitelist_log": True,

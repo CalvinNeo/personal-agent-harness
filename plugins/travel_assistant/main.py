@@ -12,6 +12,7 @@ from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.core.star.filter.command import GreedyStr
+from astrbot.core.pipeline.preprocess_stage.voice_input import get_voice_input_text
 
 from .core import (ResultStore, TZ, TravelError, eligible_text, map_links, owner_key,
                    query_values, rank_offers, travel_intent)
@@ -105,6 +106,9 @@ HELP = (
 
 
 def plain_text(event) -> str:
+    voice_text = get_voice_input_text(event)
+    if voice_text:
+        return voice_text
     return " ".join(part.text for part in event.get_messages() if isinstance(part, Plain)).strip()
 
 
@@ -139,7 +143,7 @@ def command_filters(options: list[str], *, default_sort: str = "price") -> tuple
     return criteria, sort
 
 
-@star.register(name="travel_assistant", author="local", desc="只读地图导航、高铁机票查询及条件筛选", version="1.0.0")
+@star.register(name="travel_assistant", author="local", desc="只读地图导航、高铁机票查询及条件筛选", version="1.0.1")
 class Main(star.Star):
     def __init__(self, context: star.Context, config: dict[str, Any] | None = None):
         super().__init__(context)
@@ -174,9 +178,10 @@ class Main(star.Star):
     def _binding(self, event):
         return {"event": id(event), "owner": self._owner(event), "text": hashlib.sha256(plain_text(event).encode()).hexdigest()}
 
-    def _authorized(self, event):
-        return (self._allowed(event) and self._addressed(event) and eligible_text(plain_text(event))
-                and event.get_extra("travel_authorized") == self._binding(event))
+    def _authorized(self, event, *, _codex_call=None, tool_name=""):
+        trusted = callable(_codex_call) and _codex_call(event, tool_name)
+        return (self._allowed(event) and self._addressed(event) and (trusted or eligible_text(plain_text(event))
+                and event.get_extra("travel_authorized") == self._binding(event)))
 
     async def _execute(self, event, action: str, **kwargs):
         try:
@@ -228,22 +233,22 @@ class Main(star.Star):
         return result
 
     async def search_tickets(self, event: AstrMessageEvent, kind: str, origin: str, destination: str,
-                             departure_date: str, criteria: dict | None = None, sort: str = "price") -> str:
-        if not self._authorized(event):
+                             departure_date: str, criteria: dict | None = None, sort: str = "price", *, _codex_call=None) -> str:
+        if not self._authorized(event, _codex_call=_codex_call, tool_name="travel_search_tickets"):
             return json.dumps({"ok": False, "code": "unauthorized", "error": "本条消息未授权票务查询。"}, ensure_ascii=False)
         result = await self._execute(event, "search", kind=kind, origin=origin, destination=destination,
                                      departure_date=departure_date, criteria=self._normalized_criteria(criteria), sort=sort)
         return json.dumps(result, ensure_ascii=False)
 
-    async def filter_tickets(self, event: AstrMessageEvent, criteria: dict, sort: str = "", result_set_id: str = "") -> str:
-        if not self._authorized(event):
+    async def filter_tickets(self, event: AstrMessageEvent, criteria: dict, sort: str = "", result_set_id: str = "", *, _codex_call=None) -> str:
+        if not self._authorized(event, _codex_call=_codex_call, tool_name="travel_filter_tickets"):
             return json.dumps({"ok": False, "code": "unauthorized", "error": "本条消息未授权筛选票务结果。"}, ensure_ascii=False)
         result = await self._execute(event, "filter", criteria=self._normalized_criteria(criteria), sort=sort, result_set_id=result_set_id)
         return json.dumps(result, ensure_ascii=False)
 
     async def maps(self, event: AstrMessageEvent, action: str, query: str = "", origin: str = "",
-                   destination: str = "", city: str = "", mode: str = "transit") -> str:
-        if not self._authorized(event):
+                   destination: str = "", city: str = "", mode: str = "transit", *, _codex_call=None) -> str:
+        if not self._authorized(event, _codex_call=_codex_call, tool_name="travel_map"):
             return json.dumps({"ok": False, "error": "本条消息未授权地图查询。"}, ensure_ascii=False)
         try:
             result = map_links(action, query=query, origin=origin, destination=destination, city=city, mode=mode)
@@ -251,8 +256,8 @@ class Main(star.Star):
             result = {"ok": False, "code": error.code, "error": str(error)}
         return json.dumps(result, ensure_ascii=False)
 
-    async def capabilities(self, event: AstrMessageEvent) -> str:
-        if not self._authorized(event):
+    async def capabilities(self, event: AstrMessageEvent, *, _codex_call=None) -> str:
+        if not self._authorized(event, _codex_call=_codex_call, tool_name="travel_capabilities"):
             return json.dumps({"ok": False, "error": "未授权。"}, ensure_ascii=False)
         return json.dumps({"ok": True, "tools": list(TOOLS), "rail": "12306班次/余票/部分核价，15天预售期",
                            "flight": "公开机票报价，单人单程经济舱，不保证实时库存、行李退改或支付总价",

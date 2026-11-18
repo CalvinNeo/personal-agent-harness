@@ -1,0 +1,5 @@
+# Optional offline recognizer environment; separate from the AstrBot venv.
+av==16.0.1
+numpy==2.5.4
+sherpa-onnx==1.12.40
+silk-python==0.2.9

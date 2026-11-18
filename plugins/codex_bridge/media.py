@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import inspect
 import io
 import ipaddress
@@ -18,6 +19,7 @@ import warnings
 MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 512 * 1024
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+MAX_VIDEO_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_EDGE = 4096
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 20_000_000
@@ -29,6 +31,18 @@ _UNSUPPORTED = {"File", "Video", "Forward", "Node", "Record"}
 _MISSING_REFERENCE = re.compile(r"(?:刚才|刚刚|刚发|前面|上面|之前|最近).{0,24}(?:图片|照片|截图|图|张)|(?:这|那)(?:几|一|两|三|四)?张(?:图|照片)?")
 _CACHE_REQUEST = re.compile(r"图片|照片|截图|图(?![书表形案库标鉴册文纸])|\b(?:images?|photos?|pictures?)\b|(?:看看?|看下|看一下)(?:这|那)(?:个|些)?(?:是什么|是啥)", re.I)
 _PLACEHOLDER = re.compile(r"\[(?:图片|图像|照片|image|视频|文件|语音|转发消息)\]", re.I)
+# Image-context plugins can be imported under different module names. Use a
+# small reason-code contract instead of class identity or exception text.
+_IMAGE_CONTEXT_ERROR_MESSAGES = {
+    "quote_missing": "QQ 这次只传回了引用标识，没有附上原始内容；我还没有拿到图片。请把图片和 @机器人 放在同一条消息里重新发送。",
+    "cache_missing": "当前未收到你在这个会话里可用的图片；请直接引用原始图片消息并 @我，或把图片和 @ 放在同一条消息重发。",
+    "count_mismatch": "你要求的图片数量超过了当前可用图片数量；请直接引用完整的原始图片消息并 @我，或把全部图片和 @ 放在同一条消息重发。",
+    "ambiguous": "这条请求中有多个图片引用，无法确定要处理哪几张；请明确数量，或直接引用要处理的原始图片消息并 @我。",
+    "denied": "当前会话或发送者无权读取图片上下文。",
+    "unavailable": "你引用的图片已不可用；请重新发送原图并 @我。",
+    "count_out_of_range": "图片数量超出允许范围；请明确有效的图片数量，或重新发送要分析的图片并 @我。",
+}
+_GENERIC_IMAGE_CONTEXT_ERROR = "图片上下文暂时不可用，请重新附上原图。"
 
 
 class ContextError(ValueError):
@@ -185,6 +199,22 @@ def _normalize(data: bytes, expected_format: str | None = None) -> bytes:
     raise ContextError("图片无法压缩到安全大小，请降低分辨率后重发。")
 
 
+def decode_video_artifact(artifact) -> bytes:
+    if not isinstance(artifact, dict) or artifact.get("mime") != "video/mp4":
+        raise ContextError("Codex 返回了不受支持的视频格式。")
+    encoded = artifact.get("data")
+    if not isinstance(encoded, str) or len(encoded) > 4 * ((MAX_VIDEO_BYTES + 2) // 3):
+        raise ContextError("Codex 返回的视频超过 8 MiB 或编码无效。")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ContextError("Codex 返回的视频编码无效。") from None
+    if (not 16 <= len(data) <= MAX_VIDEO_BYTES or data[4:8] != b"ftyp"
+            or artifact.get("size") != len(data) or artifact.get("sha256") != hashlib.sha256(data).hexdigest()):
+        raise ContextError("Codex 返回的视频未通过大小、格式或完整性校验。")
+    return data
+
+
 def decode_artifact(artifact) -> bytes:
     """Verify returned images and strip metadata without shrinking annotation text."""
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -247,7 +277,8 @@ async def _cache_selector(context):
     for metadata in stars or []:
         if getattr(metadata, "name", None) != "image_context" or getattr(metadata, "activated", True) is False:
             continue
-        selector = getattr(getattr(metadata, "star_cls", None), "select_for_task", None)
+        plugin = getattr(metadata, "star_cls", None)
+        selector = getattr(plugin, "prepare_for_task", None) or getattr(plugin, "select_for_task", None)
         if callable(selector):
             return selector
     return None
@@ -258,27 +289,43 @@ async def _select_cache(event, selector) -> list[str]:
         refs = selector(event)
         if inspect.isawaitable(refs):
             refs = await refs
-        if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
-            raise ContextError("图片上下文服务返回无效数据，请重新附上原图。")
-        return refs
-    except ValueError:
-        raise ContextError("未找到本会话中你引用的完整图片，请重新附上原图。") from None
+    except ValueError as error:
+        code = getattr(error, "code", None)
+        message = _IMAGE_CONTEXT_ERROR_MESSAGES.get(code, _GENERIC_IMAGE_CONTEXT_ERROR) if isinstance(code, str) else _GENERIC_IMAGE_CONTEXT_ERROR
+        raise ContextError(message) from None
+    if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
+        raise ContextError("图片上下文服务返回无效数据，请重新附上原图。")
+    return refs
 
 
 async def _cached_refs(event, context) -> list[str]:
     text = " ".join(str(getattr(part, "text", "")) for part in event.get_messages() if type(part).__name__ == "Plain")
-    if not _CACHE_REQUEST.search(text) and not _MISSING_REFERENCE.search(text):
-        return []
     selector = await _cache_selector(context)
+    durable = getattr(getattr(selector, "__self__", None), "_archive", None) is not None
+    if not durable and not _CACHE_REQUEST.search(text) and not _MISSING_REFERENCE.search(text):
+        return []
     refs = await _select_cache(event, selector) if selector is not None else []
     if refs:
+        # A conversation can retain arbitrarily many pictures. Keep implicit
+        # context within the runner's input bound; older pictures remain
+        # available through the history tools, so text tasks never get stuck.
+        if durable:
+            refs = refs[-MAX_IMAGES:]
         return refs
     if _MISSING_REFERENCE.search(text):
         raise ContextError("当前无法读取你之前发的图片，请在这条任务中重新附上原图。")
     return []
 
 
-async def prepare_images(event, context) -> tuple[list[dict], str]:
+async def history_tools_available(event, context):
+    selector = await _cache_selector(context)
+    plugin = getattr(selector, "__self__", None)
+    return (getattr(plugin, "_archive", None) is not None and callable(getattr(plugin, "_allowed", None))
+            and plugin._allowed(event) and callable(getattr(plugin, "list_history_for_task", None))
+            and callable(getattr(plugin, "read_history_for_task", None)))
+
+
+async def prepare_images(event, context, *, use_history_tools=False) -> tuple[list[dict], str]:
     """Resolve current/quoted attachments or the sender-scoped image plugin cache."""
     if event.get_platform_name() != "qq_official" or not event.unified_msg_origin or not str(event.get_sender_id() or ""):
         raise ContextError("图片任务缺少有效的 QQ 会话信息。")
@@ -300,7 +347,7 @@ async def prepare_images(event, context) -> tuple[list[dict], str]:
                 has_content = False
                 has_image = any(type(nested).__name__ == "Image" for nested in chain)
                 preview = str(getattr(part, "message_str", "") or "")
-                if _PLACEHOLDER.search(preview) and not has_image:
+                if _PLACEHOLDER.search(preview) and not has_image and not use_history_tools:
                     raise ContextError("引用中缺少原始附件，尚未拿到原图；请重新附上原图和文字。")
                 for nested in chain:
                     nested_kind = type(nested).__name__
@@ -314,7 +361,7 @@ async def prepare_images(event, context) -> tuple[list[dict], str]:
                         has_content = True
                     elif nested_kind == "Plain":
                         text = str(getattr(nested, "text", "") or "")
-                        if _PLACEHOLDER.search(text) and not has_image:
+                        if _PLACEHOLDER.search(text) and not has_image and not use_history_tools:
                             raise ContextError("引用中只有附件占位信息，请重新附上原图和文字。")
                         if text.strip():
                             quotes.append(text)
@@ -323,11 +370,34 @@ async def prepare_images(event, context) -> tuple[list[dict], str]:
                     raise ContextError("引用消息缺少图片或文字内容，请重新附上原图和文字。")
             else:
                 text = str(getattr(part, "message_str", "") or "").strip()
-                if not text or _PLACEHOLDER.search(text):
+                if not text:
+                    selector = await _cache_selector(context)
+                    resolver = getattr(getattr(selector, "__self__", None), "resolve_reply_for_task", None)
+                    resolved = resolver(event, part) if callable(resolver) else []
+                    if resolved:
+                        refs.extend(resolved)
+                        continue
+                    if use_history_tools or selector is not None and getattr(getattr(selector, "__self__", None), "_archive", None) is not None:
+                        # ID-only text replies can continue using the history
+                        # tools; they do not prove the quoted message was an image.
+                        continue
+                    raise ContextError(_IMAGE_CONTEXT_ERROR_MESSAGES["quote_missing"])
+                if _PLACEHOLDER.search(text) and not use_history_tools:
                     raise ContextError("引用中只有图片占位信息，尚未拿到原图；请重新附上原图和文字。")
                 quotes.append(text)
-    if not refs:
+    if not refs and not use_history_tools:
         refs = await _cached_refs(event, context)
+    elif has_current_image or has_reply_image:
+        selector = await _cache_selector(context)
+        if selector is not None:
+            selected = await _select_cache(event, selector)
+            if selected:
+                mapper = getattr(getattr(selector, "__self__", None), "attachment_archive_refs", None)
+                mapping = mapper(event) if callable(mapper) else {}
+                allowed = set(refs) | {mapping[ref] for ref in refs if ref in mapping}
+                if any(ref not in allowed for ref in selected):
+                    raise ContextError("图片上下文与本次附件不一致，当前没有提交；请重新附上要处理的原图。")
+                refs = selected
     refs = list(dict.fromkeys(refs))
     if len(refs) > MAX_IMAGES:
         raise ContextError(f"一次 Codex 任务最多附带 {MAX_IMAGES} 张图片，请分批发送。")
@@ -340,22 +410,15 @@ async def prepare_images(event, context) -> tuple[list[dict], str]:
         if not isinstance(ref, str) or len(ref) > 8192 or "\x00" in ref:
             raise ContextError("图片引用无效，请重新发送原图。")
         if ref.startswith(("/", "file:")):
-            data = await asyncio.to_thread(_read_local, ref)
+            selector = await _cache_selector(context)
+            reader = getattr(getattr(selector, "__self__", None), "read_image_for_task", None)
+            archive = getattr(getattr(selector, "__self__", None), "_archive", None)
+            if archive is not None and ref.startswith(str(archive.root) + "/") and callable(reader):
+                data = await asyncio.to_thread(reader, event, ref)
+            else:
+                data = await asyncio.to_thread(_read_local, ref)
         else:
             data = await _download(ref)
         normalized = await asyncio.to_thread(_normalize, data)
         images.append({"mime": "image/jpeg", "data": base64.b64encode(normalized).decode("ascii")})
-    if has_current_image or has_reply_image:
-        # Codex consumes the event before the normal image-cache handler runs.
-        # The authorized plugin remembers current uploads and validates explicit
-        # counts for current/quoted inputs; quoted images are never remembered.
-        # A selected subset may narrow/reorder only these direct attachments.
-        selector = await _cache_selector(context)
-        if selector is not None:
-            selected = await _select_cache(event, selector)
-            if selected:
-                by_ref = dict(zip(refs, images))
-                if any(ref not in by_ref for ref in selected):
-                    raise ContextError("图片上下文与本次附件不一致，当前没有提交；请重新附上要处理的原图。")
-                images = [by_ref[ref] for ref in dict.fromkeys(selected)]
     return images, quoted

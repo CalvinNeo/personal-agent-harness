@@ -255,12 +255,18 @@ class XHSClient:
         results = normalize_results(data, limit)
         return {"results": results, "references": search_references(data, normalize_results(data, MAX_RESULTS))}
 
-    def note_detail(self, feed_id: str, xsec_token: str) -> dict:
+    def note_detail(self, feed_id: str, xsec_token: str, *, include_source: bool = False) -> dict:
         from .notes import normalize_note
         data = self._request("POST", "/api/v1/feeds/detail", {
             "feed_id": feed_id, "xsec_token": xsec_token, "load_all_comments": False,
         })
-        return normalize_note(data, feed_id)
+        if include_source:
+            from .source import sanitized_source
+            data = sanitized_source(data, private_values=[xsec_token])
+        note = normalize_note(data, feed_id)
+        if include_source:
+            note["source"] = data
+        return note
 
     def login_status(self) -> bool:
         return self.login_details()["is_logged_in"]

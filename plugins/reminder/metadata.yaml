@@ -1,6 +1,6 @@
 name: reminder
-version: 1.3.3
+version: 1.3.6
 author: local
 repo: local
-desc: 自然语言与命令、本地持久化 QQ 群定时提醒，不经过 Codex。
+desc: 已授权群聊与私聊的本地持久化提醒，普通模型与 Codex 共用执行器。
 astrbot_version: ">=4.29.0"

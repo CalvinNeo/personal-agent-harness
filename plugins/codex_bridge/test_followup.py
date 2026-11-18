@@ -1,4 +1,5 @@
-"""Follow-up routing must retain owner-scoped Codex conversations and images."""
+"""Authorized shared followups retain runner conversations and current-actor permissions."""
+import hashlib
 import importlib
 import io
 import json
@@ -8,7 +9,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from test_plugin import Chain, Event, Image, JID, Plain, Reply, UMO, job, plugin
+from test_plugin import Chain, Event, Image, JID, Plain, Reply, UMO, job, plugin, task_prompt
 
 
 class FollowupTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +23,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.parent = job("completed", owner=self.owner, conversation_id=JID, resumable=True, context_images=1)
         self.p._rpc = AsyncMock(side_effect=self.rpc)
         self.media = importlib.import_module(plugin.__package__ + ".media")
+        self.route()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -52,7 +54,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call["op"] for call in calls], ["status", "submit"])
         self.assertEqual(calls[0], {"op": "status", "owner": self.owner, "job_id": JID})
         self.assertEqual(calls[1]["parent_job_id"], JID)
-        self.assertEqual(calls[1]["prompt"], "原图日期有的，你再看看")
+        self.assertEqual(task_prompt(calls[1]["prompt"]), "原图日期有的，你再看看")
         self.assertEqual(calls[1]["mode"], "read-only")
         self.assertNotIn("images", calls[1])
         self.assertTrue(event.stopped)
@@ -60,7 +62,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("同会话续接", event.sent[0])
         self.assertIn("会话原图：1 张", event.sent[0])
         image_selector.assert_not_called()
-        saved = json.loads(self.p.routes_file.read_text())["jobs"][0]
+        saved = next(item for item in json.loads(self.p.routes_file.read_text())["jobs"] if item["id"] != JID)
         self.assertEqual(saved["parent_job_id"], JID)
         self.assertNotIn("原回复报告", self.p.routes_file.read_text())
 
@@ -68,7 +70,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         for index, text in enumerate(("不对", "继续", "日期呢？", "这个部分漏了", "补上右下角", "谢谢")):
             event = self.event(text, message_id=str(index))
             await self.p.natural_status(event)
-            self.assertEqual(self.p._rpc.call_args.args[0]["prompt"], text)
+            self.assertEqual(task_prompt(self.p._rpc.call_args.args[0]["prompt"]), text)
             self.assertEqual(self.p._rpc.call_args.args[0]["parent_job_id"], JID)
 
     async def test_queued_or_running_parent_can_accept_followup_turn(self):
@@ -93,12 +95,12 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         await self.p.natural_status(event)
         payload = self.p._rpc.call_args.args[0]
         self.assertEqual(payload["parent_job_id"], JID)
-        self.assertEqual(payload["prompt"], "原图日期有的，你再看看")
+        self.assertEqual(task_prompt(payload["prompt"]), "原图日期有的，你再看看")
         self.assertIn("同会话续接", event.sent[0])
 
     async def test_retry_resolves_legacy_assistant_quote_by_labeled_task_id(self):
         self.route()
-        quoted = ("已看到你引用的任务：用 Codex 找一下好玩的南京两人剧本杀。\n"
+        quoted = ("已看到你引用的任务：用 Codex 找一下合成项目的公开技术资料。\n"
                   "上次任务编号是：\n`12345678abcdef01`\n"
                   "可用命令：`/codex status 12345678` 或 `/codex result 12345678`")
         for phrase in ("重新提交", "再提交", "重试", "重试刚才的任务", "重新执行", "继续刚才的 Codex 任务", "再跑一次"):
@@ -107,7 +109,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
             payload = self.p._rpc.await_args_list[-1].args[0]
             self.assertEqual(payload["op"], "submit", phrase)
             self.assertEqual(payload["parent_job_id"], JID, phrase)
-            self.assertEqual(payload["prompt"], phrase, phrase)
+            self.assertEqual(task_prompt(payload["prompt"]), phrase, phrase)
             self.assertEqual(payload["mode"], "read-only", phrase)
 
     async def test_retry_ignores_unlabeled_hex_and_non_codex_task_references(self):
@@ -129,8 +131,8 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("请引用要重新提交的 Codex 任务回复", event.sent[0])
         self.p._rpc.assert_not_awaited()
 
-    async def test_retry_reference_cannot_bind_another_owner_route(self):
-        self.route(owner=plugin.owner_key(UMO, "bob"))
+    async def test_retry_reference_cannot_bind_revoked_source_scope(self):
+        self.route(owner=plugin.owner_key("qq:GroupMessage:revoked", "bob"), umo="qq:GroupMessage:revoked", sender="bob")
         event = Event("重新提交", quoted="Codex 上次任务编号是：`12345678abcdef01`")
         await self.p.natural_status(event)
         self.assertIn("请引用要重新提交的 Codex 任务回复", event.sent[0])
@@ -163,7 +165,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         await self.p.natural_status(event)
         self.assertEqual(self.p._rpc.call_args.args[0]["op"], "submit")
         self.assertEqual(self.p._rpc.call_args.args[0]["parent_job_id"], JID)
-        self.assertEqual(self.p._rpc.call_args.args[0]["prompt"], "请把这个信息再确认一遍")
+        self.assertEqual(task_prompt(self.p._rpc.call_args.args[0]["prompt"]), "请把这个信息再确认一遍")
 
     async def test_retry_prohibitions_do_not_create_followup_job(self):
         self.route()
@@ -188,22 +190,29 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         await self.p.natural_status(event)
         self.p._rpc.assert_awaited_once_with({"op": "status", "owner": self.owner, "job_id": JID})
 
-    async def test_message_mapping_cannot_resume_different_sender(self):
+    async def test_message_mapping_resumes_for_another_authorized_sender(self):
         self.route(ids=["qq-result-message"])
         event = Event("再看看", quoted="[图片]", sender="bob")
         event.parts[-1].id = "qq-result-message"
         await self.p.natural_status(event)
-        self.assertFalse(event.stopped)
-        self.p._rpc.assert_not_awaited()
+        self.assertTrue(event.stopped)
+        calls = [call.args[0] for call in self.p._rpc.await_args_list]
+        self.assertEqual([call['op'] for call in calls], ['status', 'submit'])
+        self.assertEqual(calls[-1]['parent_job_id'], JID)
+        child = self.p.routes[calls[-1]['job_id']]
+        self.assertEqual(child['owner'], plugin.owner_key(UMO, 'bob'))
+        self.assertEqual(child['runner_owner'], self.owner)
+        self.assertEqual(self.p._runner_payload(calls[-1])['owner'], self.owner)
 
     async def test_server_owner_check_precedes_any_image_read(self):
+        self.parent["owner"] = plugin.owner_key(UMO, "unexpected-runner-owner")
         for kwargs in ({"sender": "bob"}, {"umo": "qq:GroupMessage:other"}):
             event = self.event(**kwargs)
             event.parts.append(Image("https://gchat.qpic.cn/sensitive"))
             with patch.object(self.media, "prepare_images", new_callable=AsyncMock) as prepare:
                 await self.p.natural_status(event)
             prepare.assert_not_awaited()
-            self.assertIn("属于你在本群", event.sent[0])
+            self.assertIn("原 Codex 任务暂不可读取", event.sent[0])
         self.assertTrue(all(call.args[0]["op"] == "status" for call in self.p._rpc.await_args_list))
         self.assertFalse(self.p.routes_file.exists())
 
@@ -237,7 +246,7 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.p.routes_file.exists())
 
     async def test_plain_quotes_never_become_codex_tasks(self):
-        for quote in ("普通机器人回答", "他说请用 Codex 调研", "任务编号 #12345678abcdef01", "【Codex 任务 #12345678】"):
+        for quote in ("普通机器人回答", "他说请用 Codex 调研", "任务编号 #12345678abcdef01"):
             event = Event("原图日期有的，你再看看", quoted=quote)
             await self.p.natural_status(event)
             self.assertFalse(event.stopped)
@@ -268,14 +277,14 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["parent_job_id"], JID)
         self.assertEqual(len(payload["images"]), 1)
         self.assertEqual(payload["images"][0]["mime"], "image/jpeg")
-        self.assertEqual(payload["prompt"], "继续，补充这张图一起看")
+        self.assertEqual(task_prompt(payload["prompt"]), "继续，补充这张图一起看")
 
     async def test_direct_command_also_validates_and_resumes_parent(self):
         event = self.event("/codex 再看一下日期")
         await self.p.codex(event, "再看一下日期")
         payload = self.p._rpc.call_args.args[0]
         self.assertEqual(payload["parent_job_id"], JID)
-        self.assertEqual(payload["prompt"], "再看一下日期")
+        self.assertEqual(task_prompt(payload["prompt"]), "再看一下日期")
 
     async def test_chain_receipts_override_cumulative_event_ids_and_persist(self):
         route = self.route()
@@ -316,10 +325,10 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         await self.p.natural_status(event)
         self.assertEqual(self.p._rpc.call_args.args[0]["parent_job_id"], JID)
 
-    async def test_resume_parent_cannot_be_supplied_without_current_reply(self):
-        result = await self.p._submit(Event("继续"), "继续", parent_job_id=JID, notify=False)
+    async def test_unregistered_resume_parent_cannot_be_supplied(self):
+        result = await self.p._submit(Event("继续"), "继续", parent_job_id="f" * 16, notify=False)
         self.assertFalse(result["ok"])
-        self.assertIn("必须引用", result["error"])
+        self.assertIn("未找到已授权共享会话", result["error"])
         self.p._rpc.assert_not_awaited()
 
     async def test_read_only_followup_does_not_inherit_parent_write_mode(self):
@@ -327,8 +336,28 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
         await self.p.natural_status(self.event())
         self.assertEqual(self.p._rpc.call_args.args[0]["mode"], "read-only")
 
+
+    async def test_authorized_other_scope_resumes_original_runner_with_current_actor(self):
+        event = self.event(umo='qq:GroupMessage:other', sender='bob')
+        await self.p.natural_status(event)
+        payload = self.p._rpc.call_args.args[0]
+        self.assertEqual(payload['parent_job_id'], JID)
+        child = self.p.routes[payload['job_id']]
+        self.assertEqual(child['owner'], plugin.owner_key(event.unified_msg_origin, 'bob'))
+        self.assertEqual(child['umo'], event.unified_msg_origin)
+        self.assertEqual(child['runner_owner'], self.owner)
+        wire = self.p._runner_payload(payload)
+        self.assertEqual(wire['owner'], self.owner)
+        self.assertEqual(wire['workspace'], hashlib.sha256(UMO.encode()).hexdigest()[:32])
+        registry = self.p._registries[child['id']]
+        self.assertEqual(registry.snapshot['owner'], plugin.owner_key(event.unified_msg_origin, 'bob'))
+        self.assertEqual(registry.snapshot['sender'], 'bob')
+        self.assertEqual(registry.snapshot['umo'], event.unified_msg_origin)
+
     async def test_two_parent_replies_are_not_guessed(self):
         event = self.event()
+        other = dict(self.p.routes[JID], id="f" * 16)
+        self.p.routes[other["id"]] = other
         event.parts.append(Reply(message_str="【Codex 任务 #ffffffffffffffff】"))
         await self.p.natural_status(event)
         self.assertIn("多个 Codex 会话", event.sent[0])

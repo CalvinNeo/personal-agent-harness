@@ -1,0 +1,45 @@
+[Unit]
+Description=One-shot offline QQ voice recognition
+RequiresMountsFor=/opt/astrbot /opt/astrbot-codex-runner /var/lib/astrbot
+
+[Service]
+Type=exec
+User=astrbot
+Group=astrbot
+UMask=0077
+WorkingDirectory=/var/lib/astrbot
+ExecStart=/opt/astrbot-voice/venv/bin/python /opt/astrbot-codex-runner/voice_worker.py
+EnvironmentFile=-/etc/astrbot/voice.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+StandardInput=socket
+StandardOutput=inherit
+StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryAccounting=yes
+MemoryHigh=500M
+MemoryMax=600M
+MemorySwapMax=128M
+TasksMax=32
+CPUQuota=100%
+Nice=10
+RuntimeMaxSec=65
+TimeoutStopSec=5
+KillMode=control-group

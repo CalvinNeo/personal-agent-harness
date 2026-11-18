@@ -16,7 +16,7 @@ from .core import TZ, TravelError, offer_verdict, place
 
 RAIL = "https://kyfw.12306.cn/otn/"
 FLIGHTS = "https://www.google.com/travel/flights"
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + ".".join(("131", "0", "0", "0")) + " Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 SEAT_FIELDS = {"二等座": (30, "O"), "一等座": (31, "M"), "商务座": (32, "A9"),
                "特等座": (25, "P"), "硬座": (29, "A1"), "硬卧": (28, "A3"), "软卧": (23, "A4"), "无座": (26, "WZ")}
 RAIL_HUBS = {"上海": "上海虹桥", "北京": "北京南", "南京": "南京南", "杭州": "杭州东", "广州": "广州南",

@@ -13,12 +13,16 @@ SUITES = [
     ("plugins/intent_router", "test_*.py"),
     ("plugins/codex_bridge", "test_*.py"),
     ("plugins/xhs_search", "test_*.py"),
+    ("plugins/xianyu_watch", "test_*.py"),
     ("plugins/travel_assistant", "test_*.py"),
     ("services", "test_*.py"),
     ("tests", "test_portable_*.py"),
     ("tests", "test_qq_image_log_patch.py"),
+    ("tests", "test_qq_text_mentions.py"),
     ("tests", "test_timeout_bridge.py"),
     ("tests", "test_public_image_download.py"),
+    ("tests", "test_privacy_check.py"),
+    ("tests", "test_voice_*.py"),
 ]
 
 

@@ -2,6 +2,21 @@
   "astrbot_version": "4.29.3",
   "files": [
     {
+      "path": "astrbot/core/pipeline/preprocess_stage/stage.py",
+      "original_sha256": "826ddcaa85c61f48b6dbf50222a798359192df5b2b859afade3a930b325114c0",
+      "patched_sha256": "b4945cbc564f59de6db4d4e0cbb41c4015d413dd836564ce5161db056ee9a2f2"
+    },
+    {
+      "path": "astrbot/core/pipeline/preprocess_stage/voice_input.py",
+      "original_sha256": null,
+      "patched_sha256": "7f380078947697c2d5e1237f55001fe5a99bfe4c7ea2c15740048edf59dbcdfa"
+    },
+    {
+      "path": "astrbot/core/pipeline/waking_check/stage.py",
+      "original_sha256": "d880be8a1e23561f86c3883cedad65c7e7be34fc2eeccec647bd2ddfc1b55a65",
+      "patched_sha256": "828989efba438545daecf125daf83f60536d5ec3ce5aa6e214693593a65162af"
+    },
+    {
       "path": "astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py",
       "original_sha256": "b2b839d8dfd27da8e9011d97bc91d4777c44f3d8d0d4dc96f4ebbcc62c62d6d4",
       "patched_sha256": "d312516df1f042ac27a86ac8a11737a4d1dafd3abd69b41380c4d9c173deeea0"
@@ -9,7 +24,12 @@
     {
       "path": "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py",
       "original_sha256": "f9e9a727d645cfd53d33bd1804f43d46a8413b4ca925dcff3e024a6c0259c8f0",
-      "patched_sha256": "3c6d62ca2d58ab47b9250655c24a21cd0c832a754dc18d033332a4be5ce7fa05"
+      "patched_sha256": "496bf3328cd73ea93dede83592b0dccf10408917b01ee10928f1851e962a7f79"
+    },
+    {
+      "path": "astrbot/core/platform/sources/qqofficial/text_mentions.py",
+      "original_sha256": null,
+      "patched_sha256": "c66f4d09e0704a9a8900d2949ca85ed05dfb219ae3d411e44908cd9ddc644a5c"
     },
     {
       "path": "astrbot/core/provider/sources/openai_source.py",
