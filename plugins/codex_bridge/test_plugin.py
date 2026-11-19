@@ -182,6 +182,13 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/codex status", event.sent[0])
         self.assertEqual(self.p.routes_file.stat().st_mode & 0o777, 0o600)
 
+    async def test_slash_command_can_select_pure_codex_profile(self):
+        event = Event()
+        await self.p.codex(event, "全用 Codex 解决这个任务")
+        payload = self.p._rpc.call_args.args[0]
+        self.assertEqual(payload["execution_profile"], "pure-codex")
+        self.assertIn("纯血 Codex 执行模式", payload["prompt"])
+
     async def test_empty_help_does_not_submit(self):
         event = Event()
         await self.p.codex(event, "")

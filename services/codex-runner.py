@@ -66,7 +66,7 @@ TERMINAL = {"completed", "failed", "timed_out", "interrupted"}
 PUBLIC_FIELDS = (
     "id", "state", "mode", "created_at", "started_at", "finished_at",
     "updated_at", "last_event_at", "heartbeat_at", "phase", "result", "error", "delivery",
-    "input_images", "artifacts", "artifact_status", "execution_scope",
+    "input_images", "artifacts", "artifact_status", "execution_scope", "execution_profile",
     "conversation_id", "parent_job_id", "context_images", "resumable",
 )
 
@@ -586,6 +586,8 @@ class JobManager:
                     continue
                 if job.get("state") not in ACTIVE | TERMINAL:
                     continue
+                if job.get("execution_profile") not in {"standard", "pure-codex"}:
+                    job["execution_profile"] = "standard"
                 if job["state"] in ACTIVE:
                     job.update(state="interrupted", phase="interrupted", error="Runner restarted before task completion", finished_at=now(), updated_at=now())
                     self.persist(job)
@@ -718,6 +720,7 @@ class JobManager:
         if any(task is None or task.done() for task in (self.worker, self.heartbeat_task)):
             raise ValueError("runner unavailable")
         job_id, prompt, mode = req.get("job_id"), req.get("prompt"), req.get("mode", "read-only")
+        execution_profile = req.get("execution_profile", "standard")
         workspace = req.get("workspace")
         if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{16}", job_id):
             raise ValueError("invalid job id")
@@ -725,6 +728,8 @@ class JobManager:
             raise ValueError("prompt is empty or too long")
         if mode not in {"read-only", "workspace-write"}:
             raise ValueError("invalid mode")
+        if execution_profile not in {"standard", "pure-codex"}:
+            raise ValueError("invalid execution profile")
         if not isinstance(workspace, str) or not re.fullmatch(r"[0-9a-f]{32}", workspace):
             raise ValueError("invalid workspace")
         images = media.decode_inputs(req.get("images", []))
@@ -743,6 +748,11 @@ class JobManager:
             if mode == "workspace-write" and parent["mode"] != "workspace-write":
                 raise ValueError("resume cannot elevate workspace permissions")
         identity = [workspace, prompt, mode]
+        # Keep standard requests byte-compatible with pre-profile jobs so a
+        # lost acknowledgement can still be recovered after upgrading the
+        # runner. Pure-Codex requests intentionally occupy a distinct key.
+        if execution_profile == "pure-codex":
+            identity.append(["execution_profile", execution_profile])
         # Timestamp-only retries retain the accepted snapshot; changed records
         # still participate in the existing job collision protection.
         identity.append({"memory_snapshot": {k: v for k, v in memory_snapshot.items() if k != "observed_at"}})
@@ -773,7 +783,7 @@ class JobManager:
             raise ValueError("conversation_image_limit: at most four retained images")
         self.conversations.touch(conversation)
         stamp = now()
-        job = dict(id=job_id, state="queued", mode=mode, created_at=stamp, started_at=None,
+        job = dict(id=job_id, state="queued", mode=mode, execution_profile=execution_profile, created_at=stamp, started_at=None,
                    finished_at=None, updated_at=stamp, last_event_at=None, heartbeat_at=stamp,
                    phase="queued", result=None, error=None, delivery="pending",
                    input_images=len(images), artifacts=[], artifact_status="pending" if images else "none",

@@ -163,6 +163,33 @@ class IntentTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(core.natural_codex_request(text))
 
+    def test_pure_codex_mode_is_explicit_and_preserves_local_tasks_as_codex_tasks(self):
+        cases = (
+            "全用 Codex 解决这个提醒任务",
+            "纯血 Codex 帮我搜索闲鱼 infantino",
+            "完全交给 Codex 检查小红书登录态",
+            "全程交给 Codex 处理这个出行方案",
+            "Use only Codex to fix this",
+            "Codex-only compare these options",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertTrue(core.pure_codex_requested(text))
+                self.assertEqual(core.natural_codex_request(text), ("read-only", text))
+
+    def test_pure_codex_mode_does_not_match_capability_questions_or_opt_out(self):
+        for text in (
+            "全用 Codex",
+            "怎么用 Codex？",
+            "增加一个纯血 Codex 模式",
+            "这个纯血 Codex 模式是针对所有功能的",
+            "纯血 Codex 模式能不能查提醒？",
+            "不要全用 Codex，直接回答",
+            "‘全用 Codex 解决这个问题’这句话是什么意思？",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(core.pure_codex_requested(text))
+
 
 if __name__ == "__main__":
     unittest.main()

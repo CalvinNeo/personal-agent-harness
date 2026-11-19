@@ -126,6 +126,18 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_prompt", json.loads(path.read_text()))
         self.assertEqual((await self.finished())["result"], "done")
 
+    async def test_pure_codex_profile_is_persisted_and_public(self):
+        payload = request("2222222222222222", execution_profile="pure-codex")
+        accepted = self.manager.request(payload)
+        self.assertEqual(accepted["job"]["execution_profile"], "pure-codex")
+        self.assertEqual((await self.finished("2222222222222222"))["execution_profile"], "pure-codex")
+        stored = json.loads((self.root / "jobs" / "2222222222222222.json").read_text())
+        self.assertEqual(stored["execution_profile"], "pure-codex")
+
+    async def test_invalid_execution_profile_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "execution profile"):
+            self.manager.request(request(execution_profile="danger-full-access"))
+
     async def test_socket_disconnect_does_not_cancel_job(self):
         socket_path = str(self.root / "test.sock")
         self.program = fake_program("time.sleep(.1)", emit({"type": "item.completed", "item": {"type": "agent_message", "text": "survived"}}))

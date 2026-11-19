@@ -14,7 +14,7 @@ _EXTRAS = frozenset({"voice_input_transcribed", "voice_input_transcript", "inten
                      "intent_router_route", "intent_router_task", "schedule_image_candidate",
                      "created_schedule_result", "created_simple_reminder_result", "long_term_memory_tool_done",
                      "current_request_received_at", "current_request_has_images", "codex_first_submitted", "scheduled_task_id",
-                     "codex_subtask_depth"})
+                     "codex_subtask_depth", "codex_pure_mode", "codex_execution_profile"})
 
 
 def event_is_addressed(event) -> bool:

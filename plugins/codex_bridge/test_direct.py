@@ -33,6 +33,16 @@ class DirectRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(event.llm)
                 self.assertEqual(event.sent, [])
 
+    async def test_pure_mode_is_submitted_once_even_when_direct_and_natural_routes_both_run(self):
+        self.bridge._rpc = AsyncMock(return_value={"ok": True, "job": job()})
+        event = Event("全用 Codex 设置一个两分钟后的提醒")
+        await self.bridge.route_directly_to_codex(event)
+        await self.bridge.natural_status(event)
+        self.bridge._rpc.assert_awaited_once()
+        payload = self.bridge._rpc.call_args.args[0]
+        self.assertEqual(payload["execution_profile"], "pure-codex")
+        self.assertIn("纯血 Codex 执行模式", payload["prompt"])
+
     async def test_default_off_invalid_config_and_unauthorized_messages_fall_through(self):
         self.bridge._submit = AsyncMock()
         for value in (None, False, "false", 1):

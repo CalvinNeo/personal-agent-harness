@@ -19,7 +19,7 @@ from astrbot.api.event.filter import PlatformAdapterType
 from astrbot.api.message_components import Plain, Reply
 from astrbot.core.star.filter.command import GreedyStr
 
-from .core import ID_RE, TERMINAL, board, codex_opt_out, continuation_eligible, job_key, natural_codex_request, natural_query, new_codex_conversation, owner_key, query, quoted_job_id, quoted_task_references, retry_intent, safe_text, stamp
+from .core import ID_RE, TERMINAL, board, codex_opt_out, continuation_eligible, job_key, natural_codex_request, natural_query, new_codex_conversation, owner_key, pure_codex_requested, query, quoted_job_id, quoted_task_references, retry_intent, safe_text, stamp
 from .semantic import TOOL_NAME, TOOL_SCHEMA, TOOL_DESCRIPTION, ROUTING_INSTRUCTION, semantic_eligible
 from .memory import local_memory_request, saved_relationship_facts
 from .mentions import parse_mention_request, native_mention_targets, strip_verified_mention_markup
@@ -56,6 +56,11 @@ class _NoImageCacheContext:
         return []
 
 HELP = "群里直接 @我、私聊直接说：请用 Codex 分析……，或交给 Codex 检查……\n明确的编程、排错和多步骤调研也会自动交给 Codex。\n仍支持：/codex 任务描述\n查进度：Codex 任务怎么样了，或 /codex status [任务编号]\n共享最近任务：/codex tasks\n查看结果：/codex result [任务编号]\n引用 Codex 结果直接追问，会在原会话继续并保留原图。\n默认只读；已授权会话内的成员可查看、引用及续接彼此任务；省略编号时查询共享最近任务。"
+PURE_CODEX_INSTRUCTION = (
+    "[纯血 Codex 执行模式] 用户明确要求本任务全程由 Codex 托管。由你负责拆解、选择工具、读取上下文、执行受控本地工具、验证结果和整理最终答复；不要把本应由你完成的步骤交回桥接器或普通模型。"
+    "如果需要临时脚本，必须由你在当前任务的 .tmp/ 目录中自行创建、运行、检查并清理；不要要求桥接层代写脚本，也不要把脚本写入主工作区。"
+    "本地插件只作为你通过 current_chat MCP 看到的受控工具使用，只有真实工具回执才可声称操作成功；最终结果仍由桥接器回传当前QQ会话。"
+)
 
 
 class Main(star.Star):
@@ -305,11 +310,17 @@ class Main(star.Star):
     @filter.platform_adapter_type(PlatformAdapterType.QQOFFICIAL)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE, priority=140)
     async def route_directly_to_codex(self, event: AstrMessageEvent):
-        if (self.config.get("codex_first_enabled") is not True or not self._allowed(event)
+        text = _event_text(event)
+        pure_mode = pure_codex_requested(text)
+        if ((self.config.get("codex_first_enabled") is not True and not pure_mode) or not self._allowed(event)
                 or not event_is_addressed(event) or event.get_extra("codex_first_submitted")):
             return
-        text = _event_text(event)
         if text.startswith("/") or codex_opt_out(text):
+            return
+        if pure_mode:
+            self._consume(event)
+            event.set_extra("codex_pure_mode", True)
+            await self._submit(event, text, "read-only", pure_mode=True)
             return
         quotes = [self._reply_text(part) for part in event.get_messages() if isinstance(part, Reply)]
         retry_prompt = self._retry_failed_prompt(text, quotes)
@@ -859,7 +870,7 @@ class Main(star.Star):
         mode = "read-only"
         if prompt.lower().startswith("write "):
             mode, prompt = "workspace-write", prompt[6:].strip()
-        await self._submit(event, prompt, mode)
+        await self._submit(event, prompt, mode, pure_mode=pure_codex_requested(prompt))
 
     @filter.platform_adapter_type(PlatformAdapterType.QQOFFICIAL)
     @filter.command("定时任务列表", priority=100)
@@ -916,6 +927,7 @@ class Main(star.Star):
                 event.set_extra("qq_current_capability_registry", None)
                 response = await self._submit(
                     event, child_prompt, "read-only", notify=False,
+                    pure_mode=event.get_extra("codex_execution_profile") == "pure-codex",
                     job_id_override=f"{message_id}:child:{index}:{secrets.token_hex(6)}")
                 job = response.get("job") if isinstance(response, dict) else None
                 created.append({"ok": bool(response.get("ok")) if isinstance(response, dict) else False,
@@ -928,7 +940,7 @@ class Main(star.Star):
         return {"ok": any(item.get("ok") for item in created), "created": created,
                 "notice": "子任务结果会自动回传当前QQ会话；未创建成功的子任务保留其错误。"}
 
-    async def _submit(self, event, prompt, mode="read-only", *, notify=True, parent_job_id=None, schedule_id=None, job_id_override=None, retry_of=None):
+    async def _submit(self, event, prompt, mode="read-only", *, notify=True, parent_job_id=None, schedule_id=None, job_id_override=None, retry_of=None, pure_mode=False):
         """The single submission path for commands and guarded semantic tools."""
         async def respond(text, *, ok=False, job=None, pending=False, code=None):
             if notify:
@@ -956,6 +968,9 @@ class Main(star.Star):
         if not prompt or len(prompt) > max_prompt:
             return await respond("任务描述不能为空，且最多 12000 个字符。")
         event.set_extra("codex_first_submitted", True)
+        if pure_mode:
+            event.set_extra("codex_pure_mode", True)
+            event.set_extra("codex_execution_profile", "pure-codex")
         original_prompt = (retry_route.get("original_prompt") or _event_text(event)) if retry_route else prompt
         capability_text = original_prompt
         from .request_context import capture_received_at
@@ -1012,6 +1027,12 @@ class Main(star.Star):
                 # never this sender's unrelated newer upload in the general cache.
                 media_event = _MediaEvent(event, [part for part in parts if not isinstance(part, Plain)])
                 media_context = _NoImageCacheContext()
+        if parent_route and parent_route.get("execution_profile") == "pure-codex":
+            pure_mode = True
+            event.set_extra("codex_pure_mode", True)
+            event.set_extra("codex_execution_profile", "pure-codex")
+        if pure_mode:
+            event.set_extra("codex_execution_profile", "pure-codex")
         from .media import ContextError, prepare_images, history_tools_available
         try:
             images, quoted = await prepare_images(media_event, media_context,
@@ -1035,6 +1056,8 @@ class Main(star.Star):
         if len(prompt) > max_prompt:
             return await respond("任务与引用内容合计过长，当前还没有提交；请缩短到 12000 字以内。")
         original_request_prompt = retry_route.get("original_request_prompt", prompt) if retry_route else prompt
+        if pure_mode:
+            prompt = PURE_CODEX_INSTRUCTION + "\n\n" + prompt
         from .memory import with_memory_context, memory_snapshot
         live_memory = any(item["function"]["name"] == "list_my_long_term_memories" for item in registry.schemas())
         if not live_memory:
@@ -1061,6 +1084,10 @@ class Main(star.Star):
             route.setdefault("original_prompt", original_prompt)
             route.setdefault("original_request_prompt", original_request_prompt)
             route.setdefault("execution_mode", mode)
+            if pure_mode:
+                route["execution_profile"] = "pure-codex"
+            else:
+                route.setdefault("execution_profile", "standard")
             if retry_route:
                 route.update(auto_retry_of=retry_of, auto_retry_count=1)
                 if retry_route.get("recipient") is not None:
@@ -1095,7 +1122,7 @@ class Main(star.Star):
             self._registries[jid] = registry
             try:
                 tools = [item.get("function", item) for item in registry.schemas(codex=True)]
-                response = await self._rpc({"op": "submit", "job_id": jid, "owner": owner, "workspace": hashlib.sha256(umo.encode()).hexdigest()[:32], "prompt": prompt, "mode": mode, "memory_snapshot": task_memory, "capability_tools": tools, **({"images": images} if images else {}), **({"parent_job_id": parent_job_id} if parent_job_id else {})})
+                response = await self._rpc({"op": "submit", "job_id": jid, "owner": owner, "workspace": hashlib.sha256(umo.encode()).hexdigest()[:32], "prompt": prompt, "mode": mode, "execution_profile": "pure-codex" if pure_mode else "standard", "memory_snapshot": task_memory, "capability_tools": tools, **({"images": images} if images else {}), **({"parent_job_id": parent_job_id} if parent_job_id else {})})
             except Exception:
                 self.logger.warning("Codex submit acknowledgement unavailable id=%s", jid)
                 return await respond(f"Codex 提交确认暂未返回，任务编号 #{jid}。\n请用 /codex status {jid} 查看是否已受理，避免重复提交。", pending=True, job={"id": jid})
@@ -1141,10 +1168,17 @@ class Main(star.Star):
             return
         if await self._handle_current_mention(event):
             return
-        if event.get_extra("codex_timeout_submitted"):
+        if event.get_extra("codex_timeout_submitted") or event.get_extra("codex_first_submitted"):
             return
         parts = event.get_messages()
         text = _event_text(event)
+        pure_mode = pure_codex_requested(text)
+        if pure_mode:
+            self._consume(event)
+            if self._allowed(event):
+                self.logger.info("Codex natural route source=pure owner=%s", owner_key(event.unified_msg_origin, str(event.get_sender_id()))[:12])
+                await self._submit(event, text, "read-only", pure_mode=True)
+            return
         if local_memory_request(self.context, event):
             return
         if event.get_extra("xhs_notes_request") and not re.search(r"codex", text, re.I):

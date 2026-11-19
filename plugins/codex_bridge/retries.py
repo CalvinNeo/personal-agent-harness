@@ -142,7 +142,8 @@ class AutomaticRetries:
                 plan["submit_attempts"] = int(plan.get("submit_attempts", 0)) + 1
                 bridge._save()
                 response = await bridge._submit(event, prompt, route.get("execution_mode", "read-only"),
-                    notify=False, retry_of=route["id"], job_id_override=plan["seed"])
+                    notify=False, retry_of=route["id"], job_id_override=plan["seed"],
+                    pure_mode=route.get("execution_profile") == "pure-codex")
                 if response.get("ok"):
                     plan["state"] = "accepted"
                     bridge._save()

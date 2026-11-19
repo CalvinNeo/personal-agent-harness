@@ -23,6 +23,25 @@ class NaturalHandlerTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    async def test_pure_mode_preempts_local_reminder_and_submits_to_codex(self):
+        event = Event("全用 Codex 设置一个两分钟后的提醒")
+        await self.p.natural_status(event)
+        self.assertTrue(event.stopped)
+        self.assertTrue(event.sent)
+        payload = self.p._rpc.call_args.args[0]
+        self.assertEqual(payload["execution_profile"], "pure-codex")
+        self.assertIn("纯血 Codex 执行模式", payload["prompt"])
+        route = json.loads(self.p.routes_file.read_text())["jobs"][0]
+        self.assertEqual(route["execution_profile"], "pure-codex")
+
+    async def test_pure_mode_preempts_business_plugin_for_xianyu_search(self):
+        event = Event("纯血 Codex 帮我搜索闲鱼 infantino 早教垫")
+        await self.p.natural_status(event)
+        self.assertTrue(event.stopped)
+        payload = self.p._rpc.call_args.args[0]
+        self.assertEqual(payload["execution_profile"], "pure-codex")
+        self.assertIn("纯血 Codex 执行模式", payload["prompt"])
+
     async def test_explicit_natural_request_submits_original_and_board(self):
         event = Event("请用 Codex 比较 Python 和 Go 的并发模型")
         await self.p.natural_status(event)

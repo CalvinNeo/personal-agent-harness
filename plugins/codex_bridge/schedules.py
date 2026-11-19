@@ -121,6 +121,9 @@ class Schedules:
                 raise ValueError("invalid scheduled task identity")
             if validate_schedule(item["schedule"]) != item["schedule"]:
                 raise ValueError("invalid stored schedule")
+            if item.get("execution_profile") not in {None, "standard", "pure-codex"}:
+                raise ValueError("invalid execution profile")
+            item.setdefault("execution_profile", "standard")
             for field in ("created_at", "updated_at", "next_run_at", "end_at"):
                 value = item.get(field)
                 if value is None and field in {"next_run_at", "end_at"}:
@@ -149,6 +152,7 @@ class Schedules:
     @staticmethod
     def public(item):
         return {"id": item["id"], "title": item["title"], "prompt": item["prompt"], "state": item["state"],
+                "execution_profile": item.get("execution_profile", "standard"),
                 "schedule": copy.deepcopy(item["schedule"]), "timezone": "Asia/Shanghai", "next_run_at": iso(item.get("next_run_at")),
                 "end_at": iso(item.get("end_at")), "run_count": item.get("run_count", 0), "last_run": item.get("last_run"),
                 "running_job_id": (item.get("inflight") or {}).get("job_id"), "last_error": item.get("last_error")}
@@ -181,7 +185,10 @@ class Schedules:
             if not request["message_id"]:
                 raise ValueError("原消息编号缺失，无法防止重复创建。")
             end = timestamp(end_at) if end_at is not None else None
-            fingerprint = json.dumps([request["owner"], request["message_id"], title.strip(), prompt.strip(), schedule, end], ensure_ascii=False, sort_keys=True)
+            execution_profile = event.get_extra("codex_execution_profile") or "standard"
+            if execution_profile not in {"standard", "pure-codex"}:
+                execution_profile = "standard"
+            fingerprint = json.dumps([request["owner"], request["message_id"], title.strip(), prompt.strip(), schedule, end, execution_profile], ensure_ascii=False, sort_keys=True)
             task_id = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
             async with self.bridge._lock:
                 if task_id in self.records:
@@ -198,6 +205,7 @@ class Schedules:
                 request.update(parts=[{"type": "Plain", "text": prompt.strip()}], extras={}, awake=True)
                 item = {"id": task_id, "owner": request["owner"], "sender": request["sender"], "umo": request["umo"],
                         "title": title.strip(), "prompt": prompt.strip(), "schedule": schedule, "request": request,
+                        "execution_profile": execution_profile,
                         "state": "active", "created_at": now, "updated_at": now, "next_run_at": first,
                         "end_at": end, "run_count": 0, "inflight": None, "last_error": None}
                 self.records[task_id] = item
@@ -283,6 +291,8 @@ class Schedules:
         request = copy.deepcopy(item["request"])
         request.update(message_id=self.message_id(item, inflight["at"]), received_at=inflight["started_at"],
                        extras={"codex_first_submitted": True, "scheduled_task_id": item["id"],
+                               "codex_execution_profile": item.get("execution_profile", "standard"),
+                               "codex_pure_mode": item.get("execution_profile") == "pure-codex",
                                "current_request_received_at": inflight["started_at"]})
         return restore_event(request)
 
@@ -361,7 +371,8 @@ class Schedules:
                     item["updated_at"] = now
                     self.bridge._save()
                     event, prompt = self.event(item), self.prompt(item)
-                result = await self.bridge._submit(event, prompt, notify=False, schedule_id=task_id)
+                result = await self.bridge._submit(event, prompt, notify=False, schedule_id=task_id,
+                                                    pure_mode=item.get("execution_profile") == "pure-codex")
                 async with self.bridge._lock:
                     item = self.records[task_id]
                     if item["state"] == "active" and item.get("inflight"):

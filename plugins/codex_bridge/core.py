@@ -21,6 +21,13 @@ _TASK_ACTION = re.compile(r"(?:分析|研究|调研|检索|搜索|查(?:一下|�
 _CODE_DOMAIN = re.compile(r"(?:代码|程序|脚本|函数|算法|仓库|项目|系统|依赖|漏洞|堆栈|调用栈|报错|异常|单元测试|测试用例|性能|数据库|接口|服务|部署|日志|网页|网站|应用|页面|小程序|组件|爬虫|\b(?:code|repo(?:sitory)?|project|script|function|algorithm|stack\s*trace|bug|pull\s+request|pr|python|javascript|typescript|sql|api|html|css|react|vue|docker|rust|go|java|c\+\+)\b)", re.I)
 _CODE_ACTION = re.compile(r"(?:审查|审计|排查|诊断|定位|修复|实现|开发|编写|重构|调试|优化|补(?:齐|充)|生成|写(?:一个|个|一段|段|代码|程序|脚本|测试)|搭建|构建|跑(?:一下|下)?|执行|\b(?:review|audit|debug|investigate|fix|implement|develop|write|generate|build|refactor|test|run)\b)", re.I)
 _WRITE_MODE_NAME = r"(?:工作区写入模式|可写(?:工作区)?模式|workspace-write(?:\s+mode)?|write\s+mode)"
+_PURE_CODEX_MARKER = re.compile(
+    r"(?:全(?:部|程)?(?:都)?用|全程使用|完全使用|全部交给|完全交给|全程交给|从头到尾交给|从头到尾由|只让|只用|纯(?:血|粹)?)\s*"
+    + _CODEX
+    + r"(?:\s*(?:来|去|全程|全部|解决|处理|执行|托管))?"
+    r"|" + _CODEX + r"\s*(?:only|全程|全部|从头到尾|纯血|纯粹)"
+    r"|(?:use|run|ask)\s+only\s+" + _CODEX + r"(?:\s+(?:for|to|handle)\s+(?:everything|the\s+whole\s+task))?|let\s+" + _CODEX + r"\s+handle\s+(?:everything|the\s+whole\s+task)"
+    r"|(?:pure\s+codex|codex[- ]only|all\s+with\s+codex)", re.I)
 
 
 def instruction_text(text: str) -> str:
@@ -50,6 +57,38 @@ def codex_opt_out(text: str) -> bool:
     return bool(re.search(r"(?:不要|别|不用|无需|不必|禁止|不想|不愿|不需要|不希望|避免|无需)(?:再|给我|帮我|让|调用|使用|用|通过|交给|交由|委托|启动|转交|\s){0,12}" + _CODEX, text, re.I)
                 or re.search(r"\b(?:do\s+not|don't|never|without|avoid)\s+(?:(?:want|need)\s+)?(?:(?:use|using|call|calling|ask|asking|run|running|invoke|invoking)\s+)?" + _CODEX, text, re.I))
 
+
+
+def pure_codex_requested(text: str) -> bool:
+    """Return whether the user explicitly requests Codex-only orchestration.
+
+    This is a task routing directive, not a question about Codex capabilities.
+    The marker is intentionally narrow so ordinary discussion, quoted examples,
+    and opt-out wording keep their existing routes.
+    """
+    direct = instruction_text(text)
+    if not direct or codex_opt_out(direct):
+        return False
+    if re.search(r"(?:不要|别|不用|无需|不需要|不希望|禁止).{0,16}(?:全用|纯(?:血|粹)?\s*codex|全部交给|完全交给|全程交给|use\s+only|codex[- ]only)", direct, re.I):
+        return False
+    if (re.fullmatch(r"(?:纯(?:血|粹)?\s*codex(?:\s*模式)?|pure\s+codex\s+mode|codex[- ]only\s+mode)", direct, re.I)
+            or re.search(r"(?:什么是|什么叫|怎么用|如何使用|如何调用|介绍|解释|增加|支持|开启|关闭).{0,20}(?:纯(?:血|粹)?\s*)?codex|codex.{0,20}(?:是什么|怎么用|有什么(?:用|功能))", direct, re.I)):
+        return False
+    mode_discussion = re.search(
+        r"(?:这个|该|此|所谓|关于)?\s*(?:纯(?:血|粹)?\s*codex|pure\s+codex|codex[- ]only)\s*模式\s*"
+        r"(?:是|指|表示|意味着|支持|适用于|针对|能否|是否|能不能|可以(?:吗)?|怎么|如何|有什么)",
+        direct, re.I)
+    if mode_discussion:
+        if re.search(r"(?:能否|是否|能不能|可以(?:吗)?|怎么|如何|有什么|是什么)",
+                      mode_discussion.group(0), re.I):
+            return False
+        if not _TASK_ACTION.search(direct[mode_discussion.end():]):
+            return False
+    if not _PURE_CODEX_MARKER.search(direct):
+        return False
+    # A bare preference such as "全用 Codex" needs a task after it.
+    remainder = _PURE_CODEX_MARKER.sub(" ", direct, count=1)
+    return bool(re.sub(r"[\s，,：:。.!！?？、]+", "", remainder))
 
 
 def quoted_job_id(text: str) -> str | None:
@@ -197,8 +236,11 @@ def natural_codex_request(text: str, *, auto_complex: bool = True):
     """
     original = str(text or "").strip()
     value = instruction_text(original)
-    if not value or value.startswith("/") or codex_opt_out(value) or _local_task(value):
+    pure_mode = pure_codex_requested(value)
+    if not value or value.startswith("/") or codex_opt_out(value) or (not pure_mode and _local_task(value)):
         return None
+    if pure_mode:
+        return "read-only", original
     # Describing someone else's instruction or asking how to phrase a command
     # is not an instruction to execute it now.
     if re.match(r"^(?:转发|引用|他说|她说|有人说|例如|比如|示例|假如|假设|如果|教程|说明书|他说过|原话|\b(?:quote|example|suppose|if)\b)", value, re.I):
@@ -291,6 +333,8 @@ def board(job: dict, now: float, *, accepted=False) -> str:
     if accepted:
         lines.append("已受理 Codex " + ("图片任务（独立临时目录）" if job.get("execution_scope") == "isolated-image-task" else "工作区写入任务" if job.get("mode") == "workspace-write" else "只读任务"))
     lines.extend([f"【Codex 任务 #{jid}】", f"状态：{STATES.get(state, '查询中')} · 阶段：{PHASES.get(str(job.get('phase')), '处理中')}", f"已用时：{elapsed}"])
+    if job.get("execution_profile") == "pure-codex":
+        lines.append("执行策略：纯血 Codex（任务由 Codex 全程托管）")
     conversation_id = str(job.get("conversation_id", ""))
     parent_id = str(job.get("parent_job_id", ""))
     if re.fullmatch(r"[a-f0-9]{16}", conversation_id):
