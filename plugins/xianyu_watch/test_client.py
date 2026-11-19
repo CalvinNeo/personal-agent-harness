@@ -45,7 +45,7 @@ class Tests(unittest.TestCase):
   with self.assertRaises(c.XianyuError):self.client({'logged_in':'yes'}).status()
  def test_search_normalizes_canonical_and_image(self):
   obj=self.client({'ok':True,'results':[{'item_id':'123','title':'item','price':'88','url':'https://evil.com','image_url':'https://img.alicdn.com/a.jpg'}],'sort':'newest'})
-  result=obj.search('camera');self.assertEqual(result['results'][0]['url'],'https://www.goofish.com/item?id=123');self.assertEqual(result['sort'],'newest')
+  result=obj.search('camera');self.assertEqual(result['results'][0]['url'],'https://h5.m.goofish.com/item?id=123');self.assertEqual(result['sort'],'newest')
  def test_search_failure_code_sanitized(self):
   self.assertEqual(self.client({'ok':False,'error':'secret-url'}).search('x'),{'ok':False,'error':'service_error'})
  def test_secret_echo_rejected(self):

@@ -21,6 +21,7 @@ MIRRORS = {
     'astrbot/core/pipeline/preprocess_stage/voice_input.py': 'patches/astrbot-voice/voice_input.py',
     'astrbot/core/platform/sources/qqofficial/text_mentions.py': 'patches/astrbot-qq-mentions/text_mentions.py',
     'astrbot/core/utils/public_image_download.py': 'patches/astrbot-public-images/public_image_download.py',
+    'astrbot/core/platform/sources/qqofficial/markdown_images.py': 'patches/astrbot-qq-markdown/markdown_images.py',
 }
 
 
@@ -34,6 +35,7 @@ class VoicePatchTests(unittest.TestCase):
             'astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py',
             'astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py',
             'astrbot/core/platform/sources/qqofficial/text_mentions.py',
+            'astrbot/core/platform/sources/qqofficial/markdown_images.py',
             'astrbot/core/provider/sources/openai_source.py',
             'astrbot/core/tools/web_search_tools.py',
             'astrbot/core/utils/media_utils.py',

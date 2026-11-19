@@ -502,13 +502,13 @@ class MediaHandlerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(plugin.time, "time", return_value=200):
             await self.p._poll_once()
         self.assertEqual(len(event.sent), 1)
-        self.assertEqual(len(event.sent_images), 1)
-        self.assertEqual(route["artifacts_delivered"], ["00000001"])
+        self.assertEqual(len(event.sent_images), 0)
+        self.assertEqual(route["artifacts_delivered"], [])
         self.assertTrue(route["text_delivered"])
         self.assertFalse(route["delivered"])
         self.assertEqual(route["next_retry"], 230)
         persisted = json.loads(self.p.routes_file.read_text())["jobs"][0]
-        self.assertEqual(persisted["artifacts_delivered"], ["00000001"])
+        self.assertEqual(persisted["artifacts_delivered"], [])
         allow_second = True
         restored = plugin.Main(self.context, {"allowed_umos": [UMO]})
         restored.routes_file = self.p.routes_file
@@ -518,10 +518,11 @@ class MediaHandlerTests(unittest.IsolatedAsyncioTestCase):
             await restored._poll_once()
         self.context.send_message.assert_awaited_once()
         sent_chain = self.context.send_message.call_args.args[1]
-        self.assertEqual(len(sent_chain.chain), 1)
+        self.assertEqual(len(sent_chain.chain), 2)
+        self.assertTrue(sent_chain.use_markdown_)
         self.assertIsInstance(sent_chain.chain[0], Image)
         fetched = [c.args[0]["artifact_id"] for c in restored._rpc.await_args_list if c.args[0]["op"] == "artifact"]
-        self.assertEqual(fetched, ["00000002"])
+        self.assertEqual(fetched, ["00000001", "00000002"])
         self.assertTrue(restored.routes[JID]["delivered"])
         self.assertTrue(restored.routes[JID]["acked"])
         self.assertEqual(restored.routes[JID]["artifacts_delivered"], ["00000001", "00000002"])
@@ -532,8 +533,10 @@ class MediaHandlerTests(unittest.IsolatedAsyncioTestCase):
         event = Event()
         normal_send = event.send
         async def fail_second_image(chain):
-            if any(isinstance(part, Image) for part in chain.chain) and event.sent_images:
-                return False
+            if sum(isinstance(part, Image) for part in chain.chain) == 2:
+                await normal_send(Chain(chain.chain[:1]))
+                chain.qqofficial_delivered_image_indexes = [0]
+                raise RuntimeError("second native image rejected")
             return await normal_send(chain)
         event.send = fail_second_image
         self.p._events[JID] = event
@@ -551,7 +554,7 @@ class MediaHandlerTests(unittest.IsolatedAsyncioTestCase):
             await self.p._poll_once()
         fetched = [call.args[0]["artifact_id"] for call in self.p._rpc.await_args_list if call.args[0]["op"] == "artifact"]
         self.assertEqual(fetched, ["00000002"])
-        self.assertEqual(self.context.send_message.await_count, 2)
+        self.assertEqual(self.context.send_message.await_count, 1)
         self.assertEqual(len(event.sent), 1)
         self.assertEqual(len(event.sent_images), 1)
         self.assertTrue(route["acked"])

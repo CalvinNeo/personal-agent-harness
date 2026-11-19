@@ -19,12 +19,12 @@
     {
       "path": "astrbot/core/platform/sources/qqofficial/qqofficial_message_event.py",
       "original_sha256": "b2b839d8dfd27da8e9011d97bc91d4777c44f3d8d0d4dc96f4ebbcc62c62d6d4",
-      "patched_sha256": "d312516df1f042ac27a86ac8a11737a4d1dafd3abd69b41380c4d9c173deeea0"
+      "patched_sha256": "67f7135c40781331791b1358a8da9daf2f8bd588bae22cd36446d68a9ef4aec3"
     },
     {
       "path": "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py",
       "original_sha256": "f9e9a727d645cfd53d33bd1804f43d46a8413b4ca925dcff3e024a6c0259c8f0",
-      "patched_sha256": "496bf3328cd73ea93dede83592b0dccf10408917b01ee10928f1851e962a7f79"
+      "patched_sha256": "679eaffd18708cc4aa6f2bd6363b209b24f2d7bb60edeacb257b05a4a281cb8a"
     },
     {
       "path": "astrbot/core/platform/sources/qqofficial/text_mentions.py",
@@ -50,6 +50,11 @@
       "path": "astrbot/core/utils/public_image_download.py",
       "original_sha256": null,
       "patched_sha256": "0dd631a3fa09527ac6012155a4ebf41f304905c8ffbf90bdfb85718e4a2024aa"
+    },
+    {
+      "path": "astrbot/core/platform/sources/qqofficial/markdown_images.py",
+      "original_sha256": null,
+      "patched_sha256": "f85d259ee648e060413c230dcf6a9fcdd8e17663cb16b6ca030d06e6fa258976"
     }
   ]
 }

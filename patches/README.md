@@ -11,7 +11,7 @@ Baseline: AstrBot 4.29.3, compared byte-for-byte with the original `astrbot-4.29
 | `astrbot/core/pipeline/preprocess_stage/stage.py`, new `voice_input.py`, `waking_check/stage.py` and QQ adapter | Defers QQ audio download until access checks, transcribes offline, echoes the transcript and then rematches existing handlers. | Adds optional voice input without changing sender permissions. See [VOICE](../docs/VOICE.md). |
 | `astrbot/core/utils/media_utils.py` and new `public_image_download.py` | Routes allowlisted Wikimedia originals through an optional loopback proxy, with URL, redirect, byte and content-type checks. | Supports public reference images without changing global networking or other downloads. |
 
-The cumulative patch covers ten files: seven existing files and three new helpers. The QQ message-event changes also redact upload failure payloads so a failed QR-code upload is not written verbatim to application logs. The helpers are mirrored in `astrbot-public-images/`, `astrbot-qq-mentions/` and `astrbot-voice/` for isolated tests. Public helper names and paths are portable; patched hashes describe these repository sources rather than a private deployment copy.
+The cumulative patch covers eleven files: seven existing files and four new helpers. The QQ message-event changes also redact upload failure payloads so a failed QR-code upload is not written verbatim to application logs. The helpers are mirrored in `astrbot-public-images/`, `astrbot-qq-mentions/`, `astrbot-qq-markdown/` and `astrbot-voice/` for isolated tests. Public helper names and paths are portable; patched hashes describe these repository sources rather than a private deployment copy.
 
 The installed QQ SDK is `qq-botpy==1.2.1`. Every SDK Python file with a hash in its distribution `RECORD` matches that hash; no SDK Python modifications were found. The two QQ Official adapter files above are AstrBot files, not SDK files, and are covered by the manifest.
 
@@ -39,3 +39,9 @@ Apply this patch only to the pinned AstrBot version, from the Python environment
 ## Optional voice input
 
 The voice helper defaults to the standard local state directory and socket; `ASTRBOT_VOICE_STATE_DIRECTORY` and `ASTRBOT_VOICE_SOCKET` can override them. Voice recognition is disabled until a local `config.json` explicitly enables it. The optional one-shot worker, model setup, resource limits and synthetic tests are documented in [VOICE](../docs/VOICE.md). No model weights or user audio are included.
+
+## QQ Markdown image galleries
+
+Explicit Markdown chains containing two or three PNG/JPEG images use QQ temporary image materials and `qqbot-media://image/v1/` references. The upload destination must be a platform-issued HTTPS COS URL, without credentials, redirects or a nonstandard port. Each image is capped at 2 MiB and 16 million pixels. Upload failure or Markdown rejection retains the original native image path. Delivery records the image indexes confirmed by QQ, so a partial native fallback retries only the remaining images. Temporary materials are released after the send attempt.
+
+`tests/runtime_qq_markdown_images.py` exercises reply and proactive paths with the pinned QQ SDK, synthetic images and intercepted network calls. It does not prove rendering in a real mobile QQ client.

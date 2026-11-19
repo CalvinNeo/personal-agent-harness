@@ -101,3 +101,19 @@ PYTHONDONTWRITEBYTECODE=1 /opt/astrbot/venv/bin/python tests/runtime_xianyu.py -
 ```
 
 上线验收另在授权会话进行“二维码→App 确认→状态已登录→即时搜索→服务重启后状态→首次基线→新商品通知”闭环。不能用离线回归替代真实账号登录和商品可读性的结论；验收日志、二维码、Cookie 和商品页面响应只留在私有环境。
+
+## 商品相关性与手机链接
+
+指定品牌或型号时，创建、更新和即时查询可传入 `required_terms`，例如 `["infantino", "婴蒂诺"]`。它们是同一目标的已确认名称或别名，标题至少命中一项。英文按完整词边界匹配，并统一大小写与全角字符；不把平台推荐结果自动视为相关。无相关性证据的条目从默认基线展示和提醒中排除，旧 ID 仍保留。待发送队列在条件更新和发送前也会重新检查。
+
+商品名称作为 Markdown 超链接，目标固定生成为 `https://h5.m.goofish.com/item?id=<数字ID>`，不使用搜索响应中的任意 URL 或第三方短链。即时查询、历史基线和新商品提醒均使用该入口。
+
+2026-11-19 核对的官方移动入口：
+
+- `https://h5.m.goofish.com/item?id=1` 返回移动商品页面；合成 ID 仅用来检查路由，不代表真实商品可购买。
+- `https://h5.m.goofish.com/.well-known/apple-app-site-association` 声明了 `com.taobao.fleamarket` 的应用关联，路径覆盖 `*`。
+- `https://h5.m.goofish.com/.well-known/assetlinks.json` 声明了 Android `com.taobao.idlefish` 的 `delegate_permission/common.handle_all_urls` 关联。
+
+这使手机系统在支持并允许关联跳转时可以直接打开已安装的闲鱼 App；没有安装或浏览器未交给系统时，HTTPS 页面仍可作为回退。QQ 内置浏览器是否允许自动唤起，取决于客户端、系统和用户设置，不能保证每次直接跳转。如停留网页，可尝试页面的打开闲鱼入口，或从 QQ 菜单选择在系统浏览器打开。
+
+保留官方应用关联、网页回退和简洁的商品名称链接，无需自建跳转页或直接发送自定义 scheme。真实手机 QQ 的 App 跳转需要客户端验收，服务端 HTTP 和消息 payload 测试不能替代这一结论。

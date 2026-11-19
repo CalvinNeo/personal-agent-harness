@@ -23,7 +23,7 @@ spec = importlib.util.spec_from_file_location(PACKAGE + '.formatting', ROOT / 'f
 formatting = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = formatting
 spec.loader.exec_module(formatting)
-LINK = re.compile(r'\]\(https://www\.goofish\.com/item\?id=([0-9]+)\)')
+LINK = re.compile(r'\]\(https://h5\.m\.goofish\.com/item\?id=([0-9]+)\)')
 OTHER_SCOPE = 'synthetic_bot:GroupMessage:display-group'
 WATCH_ID = 'a' * 16
 
@@ -201,7 +201,7 @@ class DisplayTools(unittest.IsolatedAsyncioTestCase):
         chain = self.context.sent[0][1]
         self.assertTrue(chain.use_markdown_)
         self.assertFalse(chain.use_t2i_)
-        self.assertIn('[合成新商品 \\[二\\]](https://www.goofish.com/item?id=2)', chain.chain[0].text)
+        self.assertIn('[合成新商品 \\[二\\]](https://h5.m.goofish.com/item?id=2)', chain.chain[0].text)
         self.assertEqual(LINK.findall(chain.chain[0].text), ['2'])
 
 

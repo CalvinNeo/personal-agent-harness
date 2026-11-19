@@ -213,7 +213,7 @@ class XianyuClient:
             seen.add(item_id)
             items.append({"item_id": item_id, "title": re.sub(r"[\x00-\x1f\x7f]", " ", title).strip(),
                           "price": re.sub(r"[\x00-\x1f\x7f]", " ", price).strip(),
-                          "url": "https://www.goofish.com/item?id=" + item_id,
+                          "url": "https://h5.m.goofish.com/item?id=" + item_id,
                           "image_url": image_url(item.get("image_url"))})
             if len(items) >= limit:
                 break

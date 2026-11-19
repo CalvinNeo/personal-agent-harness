@@ -69,7 +69,7 @@ class Watches(unittest.IsolatedAsyncioTestCase):
   self.client.rows=[row(1),row(2),row(2)]
   await self.bridge._run(wid);await self.bridge._run(wid)
   self.assertEqual(len(self.context.sent),1);self.assertEqual(set(self.bridge.records[wid]['seen_ids']),{'1','2'});self.assertEqual(self.bridge.records[wid]['pending_alerts'],[])
-  message=self.context.sent[0][1].chain[0].text;self.assertIn('https://www.goofish.com/item?id=2',message);self.assertNotIn('evil.invalid',message);self.assertIn('12.50',message)
+  message=self.context.sent[0][1].chain[0].text;self.assertIn('https://h5.m.goofish.com/item?id=2',message);self.assertNotIn('evil.invalid',message);self.assertIn('12.50',message)
  async def test_delivery_failure_keeps_pending_same_id_after_restart(self):
   wid=await self.create();self.client.rows=[row(2)];self.context.reject=True;await self.bridge._run(wid)
   state=self.bridge.records[wid];aid=state['pending_alerts'][0]['alert_id'];self.assertNotIn('2',state['seen_ids'])

@@ -55,7 +55,7 @@ def synthetic_baseline(scope):
         "baseline_legacy": True, "baseline_at": None, "seen_ids": {item: 2_000_000_000 for item in ids},
         "pending_alerts": [], "generation": 1,
         "baseline_snapshots": {item: {"item_id": item, "title": f"合成商品 {index:02d} [小号]",
-            "price": f"{100 + index}.00", "url": "https://www.goofish.com/item?id=" + item,
+            "price": f"{100 + index}.00", "url": "https://h5.m.goofish.com/item?id=" + item,
             "observed_at": 2_000_000_000, "recovered_at": 2_000_000_000, "source": "recovered_current_query"}
             for index, item in enumerate(ids, 1)},
     }
@@ -96,7 +96,7 @@ def sdk_event(http):
 
 
 async def verify_complete_markdown_payloads(directory, checks):
-    expected_urls = {"https://www.goofish.com/item?id=" + str(700000000000000000 + index) for index in range(1, 41)}
+    expected_urls = {"https://h5.m.goofish.com/item?id=" + str(700000000000000000 + index) for index in range(1, 41)}
     summaries = []
     # Suppress framework metrics/base hooks as well as the SDK HTTP boundary;
     # no real network, QQ message or runtime state is touched by this probe.
@@ -137,7 +137,7 @@ async def verify_complete_markdown_payloads(directory, checks):
                 assert text == "".join(part.text for part in chain.chain)
                 assert len(text.encode("utf-8")) <= 3500
                 assert r"\[小号\]" in text and "补查" in text
-                actual_urls.extend(re.findall(r"\]\((https://www\.goofish\.com/item\?id=[0-9]+)\)", text))
+                actual_urls.extend(re.findall(r"\]\((https://h5\.m\.goofish\.com/item\?id=[0-9]+)\)", text))
                 numbers.extend(int(value) for value in re.findall(r"(?m)^([0-9]+)\. \[", text))
                 assert chain.qqofficial_sent_message_ids, "SDK receipt was not bound back to its original page"
                 assert bool(payload.get("msg_id")) is (path == "event")
@@ -150,7 +150,7 @@ async def verify_complete_markdown_payloads(directory, checks):
         # This is not evidence that production QQ rejected Markdown.
         denied_http = InterceptedSDKHTTP(reject_markdown=True)
         denied_event = sdk_event(denied_http)
-        chain = MessageChain([Plain("[合成商品](https://www.goofish.com/item?id=700001)")], use_markdown_=True)
+        chain = MessageChain([Plain("[合成商品](https://h5.m.goofish.com/item?id=700001)")], use_markdown_=True)
         await denied_event.send(chain)
         assert len(denied_http.payloads) == 3
         assert denied_http.payloads[0]["msg_id"] and not denied_http.payloads[1].get("msg_id")

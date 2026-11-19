@@ -91,7 +91,7 @@ def texts(chains):
 
 def rows(count=2):
     return [{"item_id": str(10001 + i), "title": f"合成测试商品 {i}", "price": f"{35 + 10*i}.00",
-             "url": f"https://www.goofish.com/item?id={10001+i}",
+             "url": f"https://h5.m.goofish.com/item?id={10001+i}",
              "image_url": f"https://gw.alicdn.com/synthetic/item-{10001+i}.jpg"} for i in range(count)]
 
 
@@ -410,7 +410,7 @@ class ProductImagePolicy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scope, SCOPE)
         self.assertFalse(images([message]))
         self.assertIn('合成测试商品 1', texts([message]))
-        self.assertIn('https://www.goofish.com/item?id=10002', texts([message]))
+        self.assertIn('https://h5.m.goofish.com/item?id=10002', texts([message]))
         self.assertEqual(self.client.image_calls, [])
         self.assertEqual(self.watch.records[watch_id]['pending_alerts'], [])
 
@@ -470,7 +470,7 @@ class SharedMonitorTools(unittest.IsolatedAsyncioTestCase):
         self.watch.file.write_text(json.dumps(stored))
         self.watch._load()
         original = copy.deepcopy(self.watch.records[watch_id])
-        self.client.search_result['results'] = [rows(1)[0], {**rows(1)[0], 'item_id': '19999', 'url': 'https://www.goofish.com/item?id=19999'}]
+        self.client.search_result['results'] = [rows(1)[0], {**rows(1)[0], 'item_id': '19999', 'url': 'https://h5.m.goofish.com/item?id=19999'}]
         peer = event('补回旧监控详情', sender=SCANNER, group=OTHER_GROUP, codex=True)
         registry = await self.registry(peer)
         refreshed = await registry.execute_codex('read_xianyu_watch', {'watch_id': watch_id, 'refresh_metadata': True}, 'legacy-monitor-refresh')

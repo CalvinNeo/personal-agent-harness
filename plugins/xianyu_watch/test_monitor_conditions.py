@@ -20,7 +20,7 @@ DENIED_SCOPE = "synthetic_bot:GroupMessage:unapproved-test-group"
 
 def product(identifier, price="12.50", title="合成测试商品"):
     return {"item_id": str(identifier), "title": title, "price": price,
-            "url": "https://www.goofish.com/item?id=" + str(identifier),
+            "url": "https://h5.m.goofish.com/item?id=" + str(identifier),
             "image_url": "https://img.alicdn.com/synthetic-fixture.jpg"}
 
 

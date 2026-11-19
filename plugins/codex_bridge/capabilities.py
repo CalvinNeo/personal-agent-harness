@@ -47,7 +47,8 @@ CODEX_INSTRUCTION = (
     "不能仅因简要字段只有文案就认定没有视频能力。资源元数据或下载地址不等于已经观看视频。"
     "可把任务相关的公开媒体和字幕下载到.tmp/，自行用现有工具读取字幕、抽帧或处理音轨；"
     "没有转写工具时如实说明，不把封面或文案冒充视频内容。不要向QQ输出签名媒体地址或访问参数。"
-    "只有要交付的最终图片和视频放入output/，桥接器会自动回传；中间文件留在.tmp/。"
+    "指定品牌或型号的闲鱼查询与监控，必须用required_terms保存名称和已确认别名，不能只凭平台搜索结果认为相关；用户指出其他品牌混入时，实际更新条件并展示过滤后的基线。"
+    "只有要交付的最终图片和视频放入output/，桥接器会自动回传；同一任务的多张图片优先合并为QQ原生Markdown图文；中间文件留在.tmp/。"
 )
 
 
@@ -336,10 +337,11 @@ class CapabilityRegistry:
             if plugin._login_status_allowed(self.event):
                 self._register("xianyu_login_status", "已授权会话成员只读检查共享闲鱼登录状态、扫码确认、授权回传和过期状态，不要求该成员发起登录。", _EMPTY, plugin.semantic_status, name)
             if plugin._allowed(self.event) and module is not None and hasattr(module, "SEARCH_SCHEMA"):
-                async def xianyu_search(event, query, limit=10, *, _codex_call=None):
+                async def xianyu_search(event, query, limit=10, *, _codex_call=None, required_terms=None):
                     details = {}
                     async def capture_search(captured):
-                        response = await plugin._search_reply(captured, query, limit)
+                        options = {"required_terms": required_terms} if required_terms is not None else {}
+                        response = await plugin._search_reply(captured, query, limit, **options)
                         if isinstance(response, dict):details.update(response)
                     receipt = await self._capture(capture_search, event)
                     receipt.update(details)

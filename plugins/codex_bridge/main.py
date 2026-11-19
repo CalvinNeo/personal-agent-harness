@@ -658,6 +658,33 @@ class Main(star.Star):
         if path is not None:
             path.unlink(missing_ok=True)
 
+    @staticmethod
+    def _artifact_batches(artifacts):
+        if len(artifacts) > 1 and all(item.get("mime") in {"image/png", "image/jpeg"} for item in artifacts):
+            return [artifacts]
+        return [[item] for item in artifacts]
+
+    async def _artifact_bundle(self, job, owner, items):
+        if len(items) == 1:
+            return await self._artifact_chain(job, owner, items[0])
+        parts = []
+        for item in items:
+            parts.extend((await self._artifact_chain(job, owner, item)).chain)
+        chain = MessageChain(parts, use_markdown_=True)
+        chain.use_t2i_ = False
+        return chain
+
+    def _remember_artifact_progress(self, route, chain, items):
+        indexes = getattr(chain, "qqofficial_delivered_image_indexes", [])
+        delivered = route.setdefault("artifacts_delivered", [])
+        for index in indexes:
+            if type(index) is int and 0 <= index < len(items):
+                aid = str(items[index].get("id", ""))
+                if aid not in delivered:
+                    delivered.append(aid)
+        self._save()
+        return bool(indexes)
+
     async def _deliver_final(self, route, job):
         """Persist text/images separately so partial retry does not spam."""
         if not route.get("text_delivered"):
@@ -670,13 +697,13 @@ class Main(star.Star):
         artifacts = job.get("artifacts") or []
         if not isinstance(artifacts, list) or len(artifacts) > 3:
             return False
-        for item in artifacts:
-            aid = str(item.get("id", ""))
-            if aid in route.get("artifacts_delivered", []):
-                continue
+        pending = [item for item in artifacts if str(item.get("id", "")) not in route.get("artifacts_delivered", [])]
+        if not pending:
+            return True
+        for items in self._artifact_batches(pending):
             chain = None
             try:
-                chain = await self._artifact_chain(job, route["owner"], item)
+                chain = await self._artifact_bundle(job, route["owner"], items)
                 event = self._events.get(route["id"])
                 if event is not None:
                     try:
@@ -685,6 +712,10 @@ class Main(star.Star):
                             raise RuntimeError("QQ rejected image")
                         self._remember_sent_ids(event, route["id"], before, chain)
                     except Exception:
+                        if self._remember_artifact_progress(route, chain, items):
+                            self._remember_sent_ids(event, route["id"], before, chain)
+                            self._events.pop(route["id"], None)
+                            return False
                         self._events.pop(route["id"], None)
                         if await self.context.send_message(route["umo"], chain) is False:
                             raise RuntimeError("QQ rejected image")
@@ -693,10 +724,11 @@ class Main(star.Star):
                     if await self.context.send_message(route["umo"], chain) is False:
                         raise RuntimeError("QQ rejected image")
                     self._remember_proactive_ids(route, chain)
-                route.setdefault("artifacts_delivered", []).append(aid)
+                route.setdefault("artifacts_delivered", []).extend(str(item.get("id", "")) for item in items)
                 self._save()
-                self.logger.info("Codex artifact delivered id=%s artifact=%s", route["id"], aid)
+                self.logger.info("Codex artifacts delivered id=%s count=%s", route["id"], len(items))
             except Exception as error:
+                self._remember_artifact_progress(route, chain, items)
                 self.logger.warning("Codex artifact delivery failed id=%s type=%s", route["id"], type(error).__name__)
                 return False
             finally:
@@ -747,8 +779,8 @@ class Main(star.Star):
                 artifacts = job.get("artifacts") or []
                 if not isinstance(artifacts, list) or len(artifacts) > 3:
                     raise RuntimeError("invalid artifact list")
-                for item in artifacts:
-                    chain = await self._artifact_chain(job, payload["owner"], item)
+                for items in self._artifact_batches(artifacts):
+                    chain = await self._artifact_bundle(job, payload["owner"], items)
                     try:
                         before = self._sent_ids(event)
                         if await event.send(chain) is False:

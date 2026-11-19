@@ -26,7 +26,7 @@ def markdown_text(value) -> str:
 def item_url(item_id) -> str:
     if not isinstance(item_id, str) or not re.fullmatch(r"[0-9]{1,32}", item_id):
         raise ValueError("invalid product id")
-    return "https://www.goofish.com/item?id=" + item_id
+    return "https://h5.m.goofish.com/item?id=" + item_id
 
 
 def product_markdown(row, number=None) -> str:
@@ -82,7 +82,7 @@ def baseline_pages(record, matching_only=True):
     """Read the entire saved snapshot, independently of the model's page size."""
     baseline = baseline_view(record, 0, 10000)
     rows = [row for row in baseline["items"]
-            if not matching_only or row.get("details_available") is True and row.get("matches_price") is True]
+            if not matching_only or row.get("details_available") is True and row.get("matches_conditions") is True]
     total, missing = baseline["total"], baseline["details_unavailable_count"]
     state = {"active": "运行中", "awaiting_login": "等待登录", "paused": "已暂停", "cancelled": "已取消"}.get(record.get("state"), "状态未知")
     header = ("闲鱼监控基线清单\n监控 " + str(record["id"]) + " · " + state
@@ -93,6 +93,8 @@ def baseline_pages(record, matching_only=True):
         header += "条件：标价严格小于 " + markdown_text(record["max_price"]) + " 元；未知或不明确总价不算符合。\n"
     else:
         header += "未设价格上限；有详情的商品按原标价展示，价格面议仍为面议。\n"
+    if baseline["required_terms"]:
+        header += "相关性：标题须包含 " + " / ".join(markdown_text(term) for term in baseline["required_terms"]) + " 中至少一项；已排除不相关商品 " + str(baseline["relevance_excluded_count"]) + " 件。\n"
     header += "本次完整展示 " + str(len(rows)) + " 件" + ("匹配商品。\n" if matching_only else "基线商品。\n")
     recovered = [row.get("recovered_at") for row in baseline["items"] if row.get("source") == "recovered_current_query"]
     if baseline["legacy"] or recovered:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -44,6 +45,49 @@ def matches_price(row, max_price=None) -> bool:
     return amount is not None and amount < Decimal(str(max_price))
 
 
+def normalize_required_terms(value):
+    """Explicit title evidence, with alternative brand/model spellings."""
+    if not isinstance(value, list) or not 1 <= len(value) <= 10:
+        raise ValueError("相关性条件须为1至10个品牌或型号名称；标题至少命中一个。")
+    terms = []
+    for term in value:
+        if not isinstance(term, str) or not 1 <= len(term.strip()) <= 100:
+            raise ValueError("相关性名称须为1至100个字符。")
+        clean = unicodedata.normalize("NFKC", term).casefold().strip()
+        if clean not in terms:
+            terms.append(clean)
+    return terms
+
+
+def relevance_terms(record):
+    if record.get("required_terms") is not None:
+        return normalize_required_terms(record["required_terms"])
+    # Legacy watches also reject broad recommendations when every query names
+    # the same Latin brand/model. Aliases are explicit, never guessed here.
+    groups = [set(re.findall(r"(?<![a-z0-9])[a-z][a-z0-9-]{2,}(?![a-z0-9])",
+                             unicodedata.normalize("NFKC", query).casefold()))
+              for query in record.get("keywords", [])]
+    shared = set.intersection(*groups) if groups else set()
+    return [max(shared, key=lambda term: (len(term), term))] if shared else []
+
+
+def matches_relevance(row, record):
+    terms = relevance_terms(record)
+    if not terms:
+        return True
+    title = unicodedata.normalize("NFKC", str(row.get("title") or "")).casefold()
+    for term in terms:
+        left = r"(?<![a-z0-9])" if re.match(r"[a-z0-9]", term) else ""
+        right = r"(?![a-z0-9])" if re.search(r"[a-z0-9]$", term) else ""
+        if re.search(left + re.escape(term) + right, title):
+            return True
+    return False
+
+
+def matches_conditions(row, record):
+    return matches_relevance(row, record) and matches_price(row, record.get("max_price"))
+
+
 def alert_id(watch_id: str, item_id: str) -> str:
     return hashlib.sha256((watch_id + "\0" + item_id).encode()).hexdigest()[:24]
 
@@ -75,7 +119,7 @@ def normalize_item(row: Any) -> dict[str, str]:
     if not re.fullmatch(r"[0-9]{1,32}", item_id) or not title:
         raise ValueError("商品编号或名称无效。")
     return {"item_id": item_id, "title": title, "price": price or "价格面议",
-            "url": "https://www.goofish.com/item?id=" + item_id, "image_url": image}
+            "url": "https://h5.m.goofish.com/item?id=" + item_id, "image_url": image}
 
 
 def baseline_snapshot(row, observed_at, *, recovered=False):
@@ -91,7 +135,8 @@ def baseline_view(record, offset=0, limit=20):
     ids = record.get("baseline_ids", [])
     snapshots = record.get("baseline_snapshots", {})
     unavailable = sum(item_id not in snapshots for item_id in ids)
-    known_matching = sum(matches_price(row, record.get("max_price")) for row in snapshots.values())
+    known_matching = sum(matches_conditions(row, record) for row in snapshots.values())
+    unrelated = sum(not matches_relevance(row, record) for row in snapshots.values())
     rows = []
     for item_id in ids[offset:offset + limit]:
         snapshot = snapshots.get(item_id)
@@ -100,10 +145,13 @@ def baseline_view(record, offset=0, limit=20):
                          "source": "legacy_ids_only", "matches_price": None})
         else:
             rows.append({**snapshot, "details_available": True,
-                         "matches_price": matches_price(snapshot, record.get("max_price"))})
+                         "matches_price": matches_price(snapshot, record.get("max_price")),
+                         "matches_relevance": matches_relevance(snapshot, record),
+                         "matches_conditions": matches_conditions(snapshot, record)})
     return {"total": len(ids), "offset": offset, "limit": limit, "has_more": offset + limit < len(ids),
             "items": rows, "snapshot_at": record.get("baseline_at"), "legacy": record.get("baseline_legacy", False),
             "details_unavailable_count": unavailable, "known_matching_count": known_matching,
+            "relevance_excluded_count": unrelated, "required_terms": relevance_terms(record),
             "matching_complete": unavailable == 0,
             "notice": ("旧版只保存已见商品ID，首次名称、价格和链接快照不可用；补回内容标注当前恢复时间，不代表首次快照。"
                        if record.get("baseline_legacy") else "首次成功扫描的完整商品快照；符合价格条件的数量与扫描总数分别记录。")}
@@ -145,6 +193,8 @@ def compact_record(record: dict) -> dict:
                "created_at", "last_run", "next_run_at", "last_error", "last_query", "metadata_refreshed_at")}
     baseline = baseline_view(record, 0, 0)
     result.update(price_comparison="exclusive_lt", pending_count=len(record.get("pending_alerts") or []),
+                  required_terms=relevance_terms(record), relevance_evidence="title",
+                  baseline_relevance_excluded_count=baseline["relevance_excluded_count"],
                   seen_count=len(record.get("seen_ids") or {}), baseline_total=baseline["total"],
                   baseline_known_matching_count=baseline["known_matching_count"],
                   baseline_matching_complete=baseline["matching_complete"],
