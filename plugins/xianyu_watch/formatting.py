@@ -94,7 +94,9 @@ def baseline_pages(record, matching_only=True):
     else:
         header += "未设价格上限；有详情的商品按原标价展示，价格面议仍为面议。\n"
     if baseline["required_terms"]:
-        header += "相关性：标题须包含 " + " / ".join(markdown_text(term) for term in baseline["required_terms"]) + " 中至少一项；已排除不相关商品 " + str(baseline["relevance_excluded_count"]) + " 件。\n"
+        header += "品牌/型号条件：标题须包含 " + " / ".join(markdown_text(term) for term in baseline["required_terms"]) + " 中至少一项。\n"
+    if baseline.get("product_terms"):
+        header += "具体商品条件：标题还须包含 " + " / ".join(markdown_text(term) for term in baseline["product_terms"]) + " 中至少一项；已排除不相关商品 " + str(baseline["relevance_excluded_count"]) + " 件。\n"
     header += "本次完整展示 " + str(len(rows)) + " 件" + ("匹配商品。\n" if matching_only else "基线商品。\n")
     recovered = [row.get("recovered_at") for row in baseline["items"] if row.get("source") == "recovered_current_query"]
     if baseline["legacy"] or recovered:

@@ -59,6 +59,20 @@ def normalize_required_terms(value):
     return terms
 
 
+def normalize_product_terms(value):
+    """Explicit product/model evidence; one of the terms must occur in title."""
+    if not isinstance(value, list) or not 1 <= len(value) <= 20:
+        raise ValueError("商品条件须为1至20个具体商品、型号或品类名称；标题至少命中一个。")
+    terms = []
+    for term in value:
+        if not isinstance(term, str) or not 1 <= len(term.strip()) <= 100:
+            raise ValueError("商品名称须为1至100个字符。")
+        clean = unicodedata.normalize("NFKC", term).casefold().strip()
+        if clean not in terms:
+            terms.append(clean)
+    return terms
+
+
 def relevance_terms(record):
     if record.get("required_terms") is not None:
         return normalize_required_terms(record["required_terms"])
@@ -71,17 +85,79 @@ def relevance_terms(record):
     return [max(shared, key=lambda term: (len(term), term))] if shared else []
 
 
-def matches_relevance(row, record):
+def _collapsed_text(value: str) -> str:
+    """Fold punctuation and whitespace so Chinese and spaced titles compare safely."""
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", unicodedata.normalize("NFKC", value).casefold())
+
+
+def _title_has_term(title: str, term: str) -> bool:
+    clean_title = unicodedata.normalize("NFKC", title).casefold()
+    clean_term = unicodedata.normalize("NFKC", term).casefold().strip()
+    if not clean_term:
+        return False
+    # Latin brand/model names keep word boundaries so `novababyplus` does not
+    # satisfy `novababy`; product phrases use folded substring matching so
+    # punctuation and spaces in marketplace titles do not matter.
+    if re.match(r"[a-z0-9]", clean_term) and re.search(r"[a-z0-9]$", clean_term):
+        return bool(re.search(r"(?<![a-z0-9])" + re.escape(clean_term) + r"(?![a-z0-9])", clean_title))
+    return _collapsed_text(clean_term) in _collapsed_text(clean_title)
+
+
+def _keyword_product_term(keyword: str, brand_terms: list[str]) -> str:
+    """Remove known brand aliases from one query and retain its product phrase."""
+    text = unicodedata.normalize("NFKC", str(keyword)).casefold().strip()
+    # Remove longest aliases first. Latin aliases use boundaries; Chinese names
+    # are naturally substring based. This keeps `infantino 早教垫` as `早教垫`.
+    for term in sorted(brand_terms, key=len, reverse=True):
+        if not term:
+            continue
+        if re.match(r"[a-z0-9]", term) and re.search(r"[a-z0-9]$", term):
+            text = re.sub(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", " ", text)
+        else:
+            text = text.replace(term, " ")
+    text = re.sub(r"[^0-9a-z\u3400-\u9fff]+", " ", text).strip()
+    return " ".join(text.split())
+
+
+def product_terms(record):
+    """Return explicit product terms or derive them from concrete search phrases."""
+    if record.get("product_terms") is not None:
+        return normalize_product_terms(record["product_terms"])
+    keywords = record.get("keywords") or []
+    brands = relevance_terms(record)
+    # Product-level filtering is an extension of the brand/model guard. Keep
+    # legacy broad monitors unchanged unless a brand/model condition is active;
+    # callers can always opt in directly with explicit product_terms.
+    if not brands:
+        return []
+    inferred = []
+    for keyword in keywords:
+        term = _keyword_product_term(keyword, brands)
+        if term and term not in inferred:
+            inferred.append(term)
+    return inferred[:20]
+
+
+def matches_brand_relevance(row, record):
     terms = relevance_terms(record)
     if not terms:
         return True
-    title = unicodedata.normalize("NFKC", str(row.get("title") or "")).casefold()
-    for term in terms:
-        left = r"(?<![a-z0-9])" if re.match(r"[a-z0-9]", term) else ""
-        right = r"(?![a-z0-9])" if re.search(r"[a-z0-9]$", term) else ""
-        if re.search(left + re.escape(term) + right, title):
-            return True
-    return False
+    title = str(row.get("title") or "") if isinstance(row, dict) else ""
+    return any(_title_has_term(title, term) for term in terms)
+
+
+def matches_product_relevance(row, record):
+    terms = product_terms(record)
+    if not terms:
+        return True
+    title = str(row.get("title") or "") if isinstance(row, dict) else ""
+    return any(_title_has_term(title, term) for term in terms)
+
+
+def matches_relevance(row, record):
+    # Brand/model evidence and concrete product evidence are separate ANDed
+    # groups. This prevents an unrelated accessory from passing on brand alone.
+    return matches_brand_relevance(row, record) and matches_product_relevance(row, record)
 
 
 def matches_conditions(row, record):
@@ -146,13 +222,15 @@ def baseline_view(record, offset=0, limit=20):
         else:
             rows.append({**snapshot, "details_available": True,
                          "matches_price": matches_price(snapshot, record.get("max_price")),
+                         "matches_brand": matches_brand_relevance(snapshot, record),
+                         "matches_product": matches_product_relevance(snapshot, record),
                          "matches_relevance": matches_relevance(snapshot, record),
                          "matches_conditions": matches_conditions(snapshot, record)})
     return {"total": len(ids), "offset": offset, "limit": limit, "has_more": offset + limit < len(ids),
             "items": rows, "snapshot_at": record.get("baseline_at"), "legacy": record.get("baseline_legacy", False),
             "details_unavailable_count": unavailable, "known_matching_count": known_matching,
             "relevance_excluded_count": unrelated, "required_terms": relevance_terms(record),
-            "matching_complete": unavailable == 0,
+            "product_terms": product_terms(record), "matching_complete": unavailable == 0,
             "notice": ("旧版只保存已见商品ID，首次名称、价格和链接快照不可用；补回内容标注当前恢复时间，不代表首次快照。"
                        if record.get("baseline_legacy") else "首次成功扫描的完整商品快照；符合价格条件的数量与扫描总数分别记录。")}
 
@@ -193,7 +271,7 @@ def compact_record(record: dict) -> dict:
                "created_at", "last_run", "next_run_at", "last_error", "last_query", "metadata_refreshed_at")}
     baseline = baseline_view(record, 0, 0)
     result.update(price_comparison="exclusive_lt", pending_count=len(record.get("pending_alerts") or []),
-                  required_terms=relevance_terms(record), relevance_evidence="title",
+                  required_terms=relevance_terms(record), product_terms=product_terms(record), relevance_evidence="title",
                   baseline_relevance_excluded_count=baseline["relevance_excluded_count"],
                   seen_count=len(record.get("seen_ids") or {}), baseline_total=baseline["total"],
                   baseline_known_matching_count=baseline["known_matching_count"],

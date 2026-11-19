@@ -175,7 +175,7 @@ class DisplayTools(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_prepares_native_links_and_keeps_structured_result_compatibility(self):
         client = harness.FakeClient()
-        client.rows = [dict(harness.row(1), title='合成查询商品 [一]'), harness.row(2)]
+        client.rows = [dict(harness.row(1), title='合成测试商品 查询款 [一]'), dict(harness.row(2), title='合成测试商品 查询款 [二]')]
         client.download_image = Mock(side_effect=AssertionError('product images disabled'))
         self.bridge.client = lambda: client
         result = await self.bridge._search_reply(self.source, '合成测试商品', 10)
@@ -196,12 +196,12 @@ class DisplayTools(unittest.IsolatedAsyncioTestCase):
         source = harness.Event('original-owner')
         client.rows = [harness.row(1)]
         created = await self.bridge._create(source, ['合成测试商品'])
-        client.rows = [harness.row(1), dict(harness.row(2), title='合成新商品 [二]')]
+        client.rows = [dict(harness.row(1), title='合成测试商品 初始款'), dict(harness.row(2), title='合成测试商品 新商品 [二]')]
         await self.bridge._run(created['watch']['id'])
         chain = self.context.sent[0][1]
         self.assertTrue(chain.use_markdown_)
         self.assertFalse(chain.use_t2i_)
-        self.assertIn('[合成新商品 \\[二\\]](https://h5.m.goofish.com/item?id=2)', chain.chain[0].text)
+        self.assertIn('[合成测试商品 新商品 \[二\]](https://h5.m.goofish.com/item?id=2)', chain.chain[0].text)
         self.assertEqual(LINK.findall(chain.chain[0].text), ['2'])
 
 

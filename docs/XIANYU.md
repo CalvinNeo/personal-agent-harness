@@ -105,6 +105,7 @@ PYTHONDONTWRITEBYTECODE=1 /opt/astrbot/venv/bin/python tests/runtime_xianyu.py -
 ## 商品相关性与手机链接
 
 指定品牌或型号时，创建、更新和即时查询可传入 `required_terms`，例如 `["infantino", "婴蒂诺"]`。它们是同一目标的已确认名称或别名，标题至少命中一项。英文按完整词边界匹配，并统一大小写与全角字符；不把平台推荐结果自动视为相关。无相关性证据的条目从默认基线展示和提醒中排除，旧 ID 仍保留。待发送队列在条件更新和发送前也会重新检查。
+品牌/型号和具体商品条件分别计算并同时生效：`required_terms` 是品牌或型号别名，`product_terms` 是标题必须命中的具体商品、型号或品类词。有品牌/型号条件且未显式提供 `product_terms` 时，会从关键词中去掉品牌词后自动提取；例如 `infantino 早教垫`、`infantino 健身架` 不会再放行同品牌抱枕或学步车。`manage_xianyu_watch(action="update", product_terms=null)` 可恢复自动提取。
 
 商品名称作为 Markdown 超链接，目标固定生成为 `https://h5.m.goofish.com/item?id=<数字ID>`，不使用搜索响应中的任意 URL 或第三方短链。即时查询、历史基线和新商品提醒均使用该入口。
 

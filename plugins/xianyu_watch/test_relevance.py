@@ -29,29 +29,47 @@ class RelevanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Otherbrand", self.context.sent[0][1].chain[0].text)
 
     async def test_explicit_alias_update_removes_queued_unrelated_and_survives_restart(self):
-        wid = await self.create()
+        self.client.rows = [fixture.product(1, title="游戏垫")]
+        created = await self.bridge._create(self.owner, ["游戏垫"])
+        self.assertTrue(created["ok"], created)
+        wid = created["watch"]["id"]
         self.context.reject = True
         self.client.rows = [fixture.product(10, title="Otherbrand 垫子"),
                             fixture.product(11, title="诺娃宝 游戏垫")]
         await self.bridge._run(wid)
-        result = await self.bridge._manage(self.owner, wid, "update", required_terms=["NovaBaby", "诺娃宝"])
+        result = await self.bridge._manage(self.owner, wid, "update", required_terms=["NovaBaby", "诺娃宝"], product_terms=["游戏垫"])
         self.assertTrue(result["ok"], result)
         record = self.bridge.records[wid]
         self.assertEqual([a["item"]["item_id"] for a in record["pending_alerts"]], ["11"])
         self.assertIn("10", record["seen_ids"])
         self.bridge = self.new()
         self.assertEqual(self.bridge.records[wid]["required_terms"], ["novababy", "诺娃宝"])
+        self.assertEqual(self.bridge.records[wid]["product_terms"], ["游戏垫"])
 
     async def test_instant_search_excludes_recommendations_and_returns_only_verified_titles(self):
         self.client.rows = [fixture.product(21, title="Otherbrand 垫子"),
-                            fixture.product(22, title="诺娃宝 健身架")]
+                            fixture.product(22, title="诺娃宝 游戏垫")]
         self.owner.get_messages = lambda: []
         self.owner.send = AsyncMock(return_value=True)
         result = await self.bridge._search_reply(self.owner, "novababy 游戏垫", required_terms=["novababy", "诺娃宝"])
         self.assertTrue(result["ok"], result)
         self.assertEqual([row["item_id"] for row in result["results"]], ["22"])
         self.assertEqual(result["relevance_excluded_count"], 1)
+        self.assertEqual(result["product_terms"], ["游戏垫"])
         self.assertNotIn("Otherbrand", str(self.owner.send.call_args))
+
+    async def test_concrete_product_terms_reject_same_brand_accessories(self):
+        rows = [fixture.product(30, title="infantino 毛毛虫沙发抱枕"),
+                fixture.product(31, title="Infantino 婴儿健身架")]
+        result = await self.bridge._create(self.owner,
+                                           ["infantino 早教垫", "infantino 健身架"],
+                                           required_terms=["infantino", "婴蒂诺"])
+        self.assertTrue(result["ok"], result)
+        record = self.bridge.records[result["watch"]["id"]]
+        self.assertNotIn("product_terms", record)
+        self.assertEqual(fixture.watcher.product_terms(record), ["早教垫", "健身架"])
+        self.assertFalse(fixture.watcher.matches_relevance(rows[0], record))
+        self.assertTrue(fixture.watcher.matches_relevance(rows[1], record))
 
 
 class MatcherTests(unittest.TestCase):
